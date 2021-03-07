@@ -1,0 +1,4 @@
+[submodule "futures-rs"]
+	path = futures-rs
+	url = git@github.com:rust-lang/futures-rs.git
+	branch = 0.3.13
