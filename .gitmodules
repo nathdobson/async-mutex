@@ -1,4 +1,8 @@
 [submodule "futures-rs"]
 	path = futures-rs
-	url = git@github.com:rust-lang/futures-rs.git
-	branch = 0.3.13
+	url = git@github.com:nathdobson/futures-rs.git
+	branch = cancel
+[submodule "loom"]
+	path = loom
+	url = git@github.com:nathdobson/loom.git
+	branch = u128
