@@ -1,4 +1,12 @@
 #[cfg(loom)]
+pub use loom::model;
+
+#[cfg(not(loom))]
+pub fn model(x: impl Fn() + Sync + Send + 'static) {
+    println!("Loom is disabled");
+}
+
+#[cfg(loom)]
 pub mod sync {
     pub use loom::sync::*;
 
@@ -53,7 +61,14 @@ pub mod thread {
 }
 
 #[cfg(loom)]
-pub use loom::future;
+pub mod future {
+    pub use loom::future::*;
+    pub use std::future::Future;
+}
 
 #[cfg(not(loom))]
-pub use std::future;
+pub mod future {
+    pub use std::future::*;
+    #[cfg(test)]
+    pub use futures::executor::block_on;
+}

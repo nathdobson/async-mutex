@@ -13,12 +13,11 @@
 #![feature(integer_atomics)]
 #![feature(cfg_target_has_atomic)]
 #![feature(backtrace)]
+#![feature(stmt_expr_attributes)]
 
 use crate::future::Future;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable};
 use std::pin::Pin;
-use futures::executor::{block_on, LocalPool};
-use futures::task::SpawnExt;
 use crate::sync::atomic::AtomicUsize;
 use crate::sync::atomic::Ordering::{Relaxed, Acquire, Release, AcqRel};
 use crate::sync::Arc;
@@ -27,9 +26,7 @@ use crate::atomic::{Atomic, Packable};
 use std::task::{Waker};
 use std::cell::{UnsafeCell, Cell};
 use std::sync::{Weak};
-use futures::task::AtomicWaker;
 use std::collections::HashMap;
-use futures::pin_mut;
 pub(crate) use crate::loom::*;
 use crate::sync::atomic::AtomicBool;
 use std::ptr::{null, null_mut};
@@ -39,13 +36,12 @@ use std::mem::{MaybeUninit, size_of, align_of};
 use std::ops::{Deref, DerefMut};
 use std::borrow::Borrow;
 use crate::util::{AsyncFnOnce, FnOnceExt, Bind};
-use either::Either;
 use crate::atomic_impl::{AtomicUsize2, usize2};
 use std::process::abort;
 use std::backtrace::{Backtrace, BacktraceStatus};
 use crate::state::{MutexState, WaiterWaker, MutexWaker, CopyWaker};
 use crate::waiter::Waiter;
-use futures::future::poll_fn;
+use crate::cancel::Cancel;
 
 mod atomic;
 mod loom;
@@ -57,6 +53,7 @@ mod test_waker;
 mod tests;
 mod state;
 mod waiter;
+pub mod cancel;
 
 pub struct Mutex<T> {
     state: Atomic<MutexState>,
@@ -99,6 +96,7 @@ enum LockFutureStep {
 
 #[must_use = "with does nothing unless polled/`await`-ed"]
 pub struct LockFuture<'a, T> {
+    cancel: &'a Cancel,
     scope: &'a MutexScope<'a, T>,
     step: LockFutureStep,
     waiter: Waiter,
@@ -236,8 +234,9 @@ impl<'a, T> MutexScope<'a, T> {
             inner: fut,
         }
     }
-    pub fn lock(&'a self) -> LockFuture<'a, T> {
+    pub fn lock(&'a self, cancel:&'a Cancel) -> LockFuture<'a, T> {
         LockFuture {
+            cancel,
             scope: self,
             step: LockFutureStep::Enter,
             waiter: Waiter::new(),
@@ -247,7 +246,7 @@ impl<'a, T> MutexScope<'a, T> {
 
 impl<'a, T> LockFuture<'a, T> {
     unsafe fn poll_enter(&mut self, cx: &mut Context<'_>) -> Poll<MutexGuard<'a, T>> {
-        if cx.should_cancel() {
+        if self.cancel.cancelling() {
             self.step = LockFutureStep::Canceled;
             return Poll::Pending;
         }
@@ -285,8 +284,7 @@ impl<'a, T> LockFuture<'a, T> {
                 WaiterWaker::Waiting(old_waker_value) => {
                     mem::drop(old_waker_value.into_waker());
                     if self.waiter.waker.cmpxchg_weak(&mut old_waker, WaiterWaker::Waiting(new_waker), AcqRel, Acquire) {
-                        if cx.should_cancel() {
-                            cx.set_pending_cancel();
+                        if self.cancel.cancelling() {
                             if !canceling {
                                 self.step = LockFutureStep::Waiting { canceling: true };
                                 let mut state = self.scope.mutex.state.load(Relaxed);
@@ -309,6 +307,7 @@ impl<'a, T> LockFuture<'a, T> {
                 }
                 WaiterWaker::Canceled => {
                     assert!(canceling);
+                    self.cancel.set_cancelled();
                     mem::drop(new_waker.into_waker());
                     self.step = LockFutureStep::Canceled;
                     return Poll::Pending;

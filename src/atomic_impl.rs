@@ -6,7 +6,8 @@ use crate::sync::atomic::AtomicU32;
 pub trait AtomicImpl {
     type Raw: Copy;
     fn new(x: Self::Raw) -> Self;
-    fn get_mut(&mut self) -> &mut Self::Raw;
+    fn load_mut(&mut self) -> Self::Raw;
+    fn store_mut(&mut self, raw: Self::Raw);
     fn load(&self, order: Ordering) -> Self::Raw;
     fn store(&self, val: Self::Raw, order: Ordering);
     fn swap(&self, val: Self::Raw, order: Ordering) -> Self::Raw;
@@ -30,7 +31,18 @@ macro_rules! atomic_impl (
         impl AtomicImpl for $imp {
             type Raw = $raw;
             fn new(x: Self::Raw) -> Self { Self::new(x) }
-            fn get_mut(&mut self) -> &mut Self::Raw { self.get_mut() }
+            fn load_mut(&mut self) -> Self::Raw {
+                #[cfg(loom)]
+                return unsafe { self.unsync_load() };
+                #[cfg(not(loom))]
+                return *self.get_mut();
+            }
+            fn store_mut(&mut self, raw: Self::Raw) {
+                #[cfg(loom)]
+                { *self = Self::new(raw); }
+                #[cfg(not(loom))]
+                { *self.get_mut() = raw; }
+            }
             fn load(&self, order: Ordering) -> Self::Raw { self.load(order) }
             fn store(&self, val: Self::Raw, order: Ordering) { self.store(val, order) }
             fn swap(&self, val: Self::Raw, order: Ordering) -> Self::Raw { self.swap(val, order) }

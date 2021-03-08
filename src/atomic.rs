@@ -18,8 +18,8 @@ impl<T: Packable> Atomic<T> {
     pub fn new(val: T) -> Self {
         Atomic(T::Impl::new(unsafe { T::encode(val) }), PhantomData)
     }
-    pub fn load_mut(&mut self) -> T { unsafe { T::decode(*self.0.get_mut()) } }
-    pub fn store_mut(&mut self, value: T) { unsafe { *self.0.get_mut() = T::encode(value); } }
+    pub fn load_mut(&mut self) -> T { unsafe { T::decode(self.0.load_mut()) } }
+    pub fn store_mut(&mut self, value: T) { unsafe { self.0.store_mut(T::encode(value)); } }
     pub fn load(&self, order: Ordering) -> T {
         unsafe { T::decode(self.0.load(order)) }
     }
