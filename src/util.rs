@@ -153,6 +153,13 @@ pub fn yield_now() -> impl Future {
     YieldNow(false)
 }
 
+#[macro_export]
+macro_rules! test_println {
+    ($($xs:tt)*) => {
+        //println!($($xs)*)
+    }
+}
+
 // struct BindUniv<A, B,F:> {
 //     first: A,
 //     fun: ,

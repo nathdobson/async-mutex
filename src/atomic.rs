@@ -1,10 +1,10 @@
-use crate::sync::atomic::{Ordering, AtomicUsize, AtomicBool, AtomicU128};
+use crate::sync::atomic::{Ordering, AtomicUsize, AtomicBool};
 use std::marker::PhantomData;
 use std::{mem};
 use crate::atomic_impl::AtomicImpl;
 
-
 /// An AtomicX containing a bitpacked `T` .
+#[derive(Debug)]
 pub struct Atomic<T: Packable>(T::Impl, PhantomData<T>);
 
 /// Specify how to bitpack a value.

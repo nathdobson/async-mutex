@@ -3,7 +3,7 @@ pub use loom::model;
 
 #[cfg(not(loom))]
 pub fn model(x: impl Fn() + Sync + Send + 'static) {
-    println!("Loom is disabled");
+    panic!("Loom is disabled");
 }
 
 #[cfg(loom)]
@@ -71,4 +71,31 @@ pub mod future {
     pub use std::future::*;
     #[cfg(test)]
     pub use futures::executor::block_on;
+}
+
+#[cfg(loom)]
+pub mod cell {
+    pub use loom::cell::*;
+}
+
+#[cfg(not(loom))]
+pub mod cell {
+    #[derive(Debug)]
+    pub struct UnsafeCell<T>(std::cell::UnsafeCell<T>);
+
+    impl<T> UnsafeCell<T> {
+        pub fn new(x: T) -> Self {
+            UnsafeCell(std::cell::UnsafeCell::new(x))
+        }
+        pub fn with<F, R>(&self, f: F) -> R where F: FnOnce(*const T) -> R {
+            f(self.0.get())
+        }
+        pub fn with_mut<F, R>(&self, f: F) -> R where F: FnOnce(*mut T) -> R {
+            f(self.0.get())
+        }
+        #[cfg(not(loom))]
+        pub fn get_mut(&mut self) -> &mut T {
+            self.0.get_mut()
+        }
+    }
 }

@@ -1,7 +1,10 @@
 use crate::sync::atomic::{Ordering, AtomicUsize, AtomicBool};
-#[cfg(target_has_atomic = "128")]
-use crate::sync::atomic::{AtomicU128};
+#[cfg(target_has_atomic = "32")]
 use crate::sync::atomic::AtomicU32;
+#[cfg(target_has_atomic = "64")]
+use crate::sync::atomic::AtomicU64;
+#[cfg(target_has_atomic = "128")]
+use crate::sync::atomic::AtomicU128;
 
 pub trait AtomicImpl {
     type Raw: Copy;
@@ -68,17 +71,32 @@ macro_rules! atomic_impl (
 
 atomic_impl!(AtomicUsize, usize);
 atomic_impl!(AtomicBool, bool);
+#[cfg(target_has_atomic = "32")]
+atomic_impl!(AtomicU32, u32);
+#[cfg(target_has_atomic = "64")]
+atomic_impl!(AtomicU64, u64);
 #[cfg(target_has_atomic = "128")]
 atomic_impl!(AtomicU128, u128);
 
-#[cfg(target_pointer_width = "16")]
+pub struct PlatformDoesNotSupportDoubleWideCompareAndSwap;
+
+#[cfg(all(target_pointer_width = "16", target_has_atomic = "32"))]
 pub type AtomicUsize2 = AtomicU32;
 
-#[cfg(target_pointer_width = "32")]
+#[cfg(all(target_pointer_width = "16", not(target_has_atomic = "32")))]
+pub type AtomicUsize2 = [PlatformDoesNotSupportDoubleWideCompareAndSwap; 0 - 1];
+
+#[cfg(all(target_pointer_width = "32", target_has_atomic = "64"))]
 pub type AtomicUsize2 = AtomicU64;
 
-#[cfg(target_pointer_width = "64")]
+#[cfg(all(target_pointer_width = "32", not(target_has_atomic = "64")))]
+pub type AtomicUsize2 = [PlatformDoesNotSupportDoubleWideCompareAndSwap; 0 - 1];
+
+#[cfg(all(target_pointer_width = "64", target_has_atomic = "128"))]
 pub type AtomicUsize2 = AtomicU128;
+
+#[cfg(all(target_pointer_width = "64", not(target_has_atomic = "128")))]
+pub type AtomicUsize2 = [PlatformDoesNotSupportDoubleWideCompareAndSwap; 0 - 1];
 
 #[allow(non_camel_case_types)]
 pub type usize2 = <AtomicUsize2 as AtomicImpl>::Raw;

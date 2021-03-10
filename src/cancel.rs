@@ -1,6 +1,6 @@
 use crate::sync::atomic::AtomicBool;
 use crate::sync::atomic::Ordering::Relaxed;
-use crate::future::Future;
+use crate::future::{Future};
 use std::task::{Context, Poll};
 use std::pin::Pin;
 use std::fmt::{Display, Formatter};
@@ -9,14 +9,14 @@ use std::fmt;
 //TODO: this should be inside std::task::Context
 pub struct Cancel {
     cancelling: AtomicBool,
-    cancelled: AtomicBool,
+    pending: AtomicBool,
 }
 
 impl Cancel {
     pub fn new() -> Self {
         Cancel {
             cancelling: Default::default(),
-            cancelled: Default::default(),
+            pending: Default::default(),
         }
     }
     pub fn set_cancelling(&self) {
@@ -25,25 +25,27 @@ impl Cancel {
     pub fn cancelling(&self) -> bool {
         self.cancelling.load(Relaxed)
     }
-    pub fn set_cancelled(&self) {
-        self.cancelled.store(true, Relaxed)
+    pub fn clear_pending(&self) {
+        self.pending.store(false, Relaxed)
     }
-    pub fn cancelled(&self) -> bool {
-        self.cancelled.load(Relaxed)
+    pub fn set_pending(&self) {
+        self.pending.store(true, Relaxed)
+    }
+    pub fn pending(&self) -> bool {
+        self.pending.load(Relaxed)
+    }
+    pub fn run<'a, F: Future>(&'a self, fut: F) -> WithCancel<'a, F> {
+        WithCancel { cancel: self, fut }
     }
 }
 
-struct WithCancel<'a, F: Future> {
+pub struct WithCancel<'a, F: Future> {
     cancel: &'a Cancel,
     fut: F,
 }
 
-fn with_cancel<'a, F: Future>(cancel: &'a Cancel, fut: F) -> WithCancel<'a, F> {
-    WithCancel { cancel: cancel, fut }
-}
-
 #[derive(Debug)]
-struct Canceled;
+pub struct Canceled;
 
 impl Display for Canceled {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -57,12 +59,13 @@ impl<'a, F: Future> Future for WithCancel<'a, F> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         unsafe {
             let this = self.get_unchecked_mut();
+            this.cancel.clear_pending();
             match Pin::new_unchecked(&mut this.fut).poll(cx) {
                 Poll::Pending =>
-                    if this.cancel.cancelled() {
-                        Poll::Ready(Err(Canceled))
-                    } else {
+                    if this.cancel.pending() {
                         Poll::Pending
+                    } else {
+                        Poll::Ready(Err(Canceled))
                     }
                 Poll::Ready(result) =>
                     Poll::Ready(Ok(result)),
