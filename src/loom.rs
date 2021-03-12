@@ -87,14 +87,14 @@ pub mod cell {
         pub fn new(x: T) -> Self {
             UnsafeCell(std::cell::UnsafeCell::new(x))
         }
-        pub fn with<F, R>(&self, f: F) -> R where F: FnOnce(*const T) -> R {
+        pub unsafe fn with<F, R>(&self, f: F) -> R where F: FnOnce(*const T) -> R {
             f(self.0.get())
         }
-        pub fn with_mut<F, R>(&self, f: F) -> R where F: FnOnce(*mut T) -> R {
+        pub unsafe fn with_mut<F, R>(&self, f: F) -> R where F: FnOnce(*mut T) -> R {
             f(self.0.get())
         }
         #[cfg(not(loom))]
-        pub fn get_mut(&mut self) -> &mut T {
+        pub unsafe fn get_mut(&mut self) -> &mut T {
             self.0.get_mut()
         }
     }

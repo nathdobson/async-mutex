@@ -1,7 +1,6 @@
 use test::Bencher;
 use futures::executor::ThreadPool;
 use futures::task::{SpawnExt, Spawn};
-use crate::cancel::Cancel;
 use crate::Mutex;
 use crate::loom::sync::Arc;
 use std::mem;
@@ -23,8 +22,8 @@ trait IsMutex {
 
 
 fn bench_mutex<T: IsMutex>(b: &mut Bencher) {
-    let tasks = 100usize;
-    let count = 10usize;
+    let tasks = 2usize;
+    let count = 1000usize;
     let rt = Runtime::new().unwrap();
     let rte = rt.enter();
     b.iter(|| {
@@ -39,13 +38,9 @@ impl IsMutex for Mutex<usize> {
     }
     fn add(self: Arc<Self>, steps: usize) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            let cancel = Cancel::new();
-            let scope = self.scope();
-            scope.with(async {
-                for i in 0..steps {
-                    step(scope.lock(&cancel).await).await;
-                }
-            }).await;
+            for i in 0..steps {
+                step(self.lock().await).await;
+            }
         })
     }
 }

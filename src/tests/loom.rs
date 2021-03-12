@@ -94,3 +94,10 @@ fn test_cancel_loom_2_1_4() {
     builder.preemption_bound = Some(4);
     run_loom(builder, cancel_test(2, 1));
 }
+
+#[test]
+fn test_cancel_loom_0_2_INF() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = None;
+    run_loom(builder, cancel_test(0, 2));
+}

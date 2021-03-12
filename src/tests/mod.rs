@@ -5,10 +5,10 @@ mod noloom;
 pub mod test;
 #[cfg(not(loom))]
 pub mod bench;
+pub mod test_waker;
 
 use futures::executor::{LocalPool, block_on};
-use crate::test_waker::TestWaker;
-use crate::{Mutex, MutexGuard, MutexScope, thread, util};
+use crate::{Mutex, MutexGuard, thread, util};
 use std::task::{Context, Poll};
 use crate::util::{FnOnceExt};
 use futures::pin_mut;
@@ -18,13 +18,10 @@ use std::mem;
 use futures::executor::ThreadPool;
 use crate::sync::Arc;
 use futures::task::{SpawnExt, Spawn};
-use rand::thread_rng;
 use futures::future::join_all;
-use rand::seq::SliceRandom;
 use std::path::Path;
 use std::fs::read_dir;
 use std::ffi::OsStr;
-use crate::cancel::{Cancel, Canceled};
 use crate::util::yield_now;
 use futures::task::noop_waker_ref;
 
@@ -60,15 +57,11 @@ fn test_uses_loom() {
 
 fn send_test() {
     async fn imp() {
-        let cancel = Cancel::new();
         let mutex = Mutex::new(0usize);
         let mut x = 1usize;
-        let scope = mutex.scope();
-        scope.with(async {
-            let guard = scope.lock(&cancel).await;
-            yield_now().await;
-            mem::drop(guard);
-        }).await;
+        let guard = mutex.lock().await;
+        yield_now().await;
+        mem::drop(guard);
     }
 
     fn assert_send<X: Send>(x: X) {}
@@ -78,13 +71,3 @@ fn send_test() {
     }
 }
 
-async fn now_or_cancel<F: Future>(cancel: &Cancel, fut: F) -> Result<F::Output, Canceled> {
-    pin_mut!(fut);
-    match fut.as_mut().poll(&mut Context::from_waker(noop_waker_ref())) {
-        Poll::Ready(x) => return Ok(x),
-        Poll::Pending => {}
-    }
-    yield_now().await;
-    cancel.set_cancelling();
-    cancel.run(fut).await
-}

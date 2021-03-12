@@ -3,6 +3,8 @@ use std::marker::PhantomData;
 use std::task::{Context, Poll};
 use std::pin::Pin;
 use std::mem;
+use std::backtrace::{Backtrace, BacktraceStatus};
+use std::process::abort;
 
 pub trait AsyncFnOnce<Args>: FnOnce<Args, Output=Self::Fut> {
     type Fut: Future<Output=Self::AsyncOutput>;
@@ -160,21 +162,11 @@ macro_rules! test_println {
     }
 }
 
-// struct BindUniv<A, B,F:> {
-//     first: A,
-//     fun: ,
-// }
-//
-// impl<'b, A, B> FnOnce<(&'b B, )> for BindUniv<A, B> {
-//     type Output = ();
-//     extern "rust-call" fn call_once(self, (y, ): (&'b B, )) -> Self::Output { (self.fun)(self.first, y) }
-// }
-//
-//
-// fn test() {
-//     fn imp<'a, 'b, A, B>(x: &'a A, y: &'b B) {}
-//     fn imp2<'a, 'b, A, B>(x: &'a A, y: &'b B) {
-//         let b = BindUniv { first: x, fun: imp };
-//         b(y);
-//     }
-// }
+pub fn bad_cancel() -> ! {
+    eprintln!("Attempted to drop future before canceling completed: aborting.");
+    let bt = Backtrace::capture();
+    if bt.status() == BacktraceStatus::Captured {
+        eprintln!("{}", bt);
+    }
+    abort();
+}

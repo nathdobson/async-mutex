@@ -3,16 +3,14 @@ use crate::sync::Arc;
 use futures::executor::{LocalPool, ThreadPool};
 use crate::future::block_on;
 use futures::task::{Spawn, SpawnExt};
-use rand::thread_rng;
-use rand::seq::SliceRandom;
 use futures::future::join_all;
 use crate::Mutex;
-use crate::cancel::Cancel;
 use crate::test_println;
 use futures::future::poll_fn;
 use futures::pin_mut;
 use std::task::Poll;
-use crate::tests::now_or_cancel;
+use futures::poll;
+use std::mem;
 
 #[derive(Copy, Clone)]
 pub struct Test<Start, Run, Stop>
@@ -71,14 +69,10 @@ pub fn simple_test(tasks: usize) -> impl IsTest {
             Mutex::new(0)
         },
         run: move |mutex, task| async move {
-            let cancel = Cancel::new();
-            let scope = mutex.scope();
-            scope.with(async {
-                test_println!("Starting {}", task);
-                let mut lock = scope.lock(&cancel).await;
-                test_println!("Running  {}", task);
-                *lock |= task;
-            }).await;
+            test_println!("Starting {}", task);
+            let mut lock = mutex.lock().await;
+            test_println!("Running  {}", task);
+            *lock |= task;
         },
         stop: move |mut mutex, _| {
             let mut expected = 0;
@@ -98,23 +92,17 @@ pub fn cancel_test(locks: usize, cancels: usize) -> impl IsTest {
             Mutex::new(0)
         },
         run: move |mutex, task| async move {
-            let cancel = Cancel::new();
-            let scope = mutex.scope();
-            scope.with(async {
-                if task < locks {
-                    test_println!("Locking    {}", task);
-                    let mut lock = scope.lock(&cancel).await;
-                    test_println!("Running    {}", task);
-                    *lock |= task;
-                } else {
-                    test_println!("Canceling  {}", task);
-                    if let Ok(guard) = now_or_cancel(&cancel, scope.lock(&cancel)).await {
-                        test_println!("Not cancel {}", task);
-                    } else {
-                        test_println!("Cancel     {}", task);
-                    }
-                }
-            }).await;
+            if task < locks {
+                test_println!("Locking    {}", task);
+                let mut lock = mutex.lock().await;
+                test_println!("Running    {}", task);
+                *lock |= task;
+            } else {
+                test_println!("Canceling  {}", task);
+                let fut = mutex.lock();
+                pin_mut!(fut);
+                mem::drop(poll!(fut));
+            }
         },
         stop: move |mut mutex, _| {
             let mut expected = 0;

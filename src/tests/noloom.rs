@@ -11,10 +11,9 @@ use std::time::Duration;
 use crate::thread::sleep;
 use std::mem;
 use std::task::{Context, Poll};
-use crate::cancel::Cancel;
 use crate::util::yield_now;
 use futures::pin_mut;
-use crate::test_waker::TestWaker;
+use crate::tests::test_waker::TestWaker;
 
 fn run_with_spawner<T: IsTest>(test: T, spawner: &dyn Spawn) -> impl Future {
     let mut state = Arc::new(test.start());
@@ -66,15 +65,11 @@ fn test_lock1() {
     assert_eq!((1, 0), test_waker.load());
     let mutex = Mutex::new(1usize);
     {
-        let cancel = Cancel::new();
         let fut = async {
-            let scope = mutex.scope();
-            scope.with(async {
-                let mut guard = scope.lock(&cancel).await;
-                ready(()).await;
-                *guard += 1;
-                *guard
-            }).await
+            let mut guard = mutex.lock().await;
+            ready(()).await;
+            *guard += 1;
+            *guard
         };
         pin_mut!(fut);
         assert_eq!(Poll::Ready(2), fut.poll(&mut cx));
@@ -91,105 +86,104 @@ fn test_lock2() {
     assert_eq!((1, 0), test_waker1.load());
     assert_eq!((1, 0), test_waker2.load());
     let mutex = Mutex::new(1usize);
-    let cancel = Cancel::new();
     {
-        async fn add_fetch(mutex: &Mutex<usize>, cancel: &Cancel) -> usize {
-            let scope = mutex.scope();
-            scope.with(async {
-                let mut guard = scope.lock(cancel).await;
-                *guard += 1;
-                yield_now().await;
-                *guard
-            }).await
-        }
-        let fut1 = add_fetch(&mutex, &cancel);
-        let fut2 = add_fetch(&mutex, &cancel);
+        let fut1 = mutex.lock();
+        let fut2 = mutex.lock();
         pin_mut!(fut1);
         pin_mut!(fut2);
 
-        assert_eq!(Poll::Pending, fut1.as_mut().poll(&mut cx1));
-        assert_eq!((2, 1), test_waker1.load());
+        let guard1 = fut1.poll(&mut cx1);
+        assert!(guard1.is_ready());
+        assert_eq!((1, 0), test_waker1.load());
         assert_eq!((1, 0), test_waker2.load());
 
-        assert_eq!(Poll::Pending, fut2.as_mut().poll(&mut cx2));
-        assert_eq!((2, 1), test_waker1.load());
+        assert!(fut2.as_mut().poll(&mut cx2).is_pending());
+        assert_eq!((1, 0), test_waker1.load());
         assert_eq!((2, 0), test_waker2.load());
 
-        assert_eq!(Poll::Ready(2), fut1.as_mut().poll(&mut cx1));
-        assert_eq!((1, 1), test_waker1.load());
+        mem::drop(guard1);
+        assert_eq!((1, 0), test_waker1.load());
         assert_eq!((1, 1), test_waker2.load());
 
-        assert_eq!(Poll::Pending, fut2.as_mut().poll(&mut cx2));
-        assert_eq!((1, 1), test_waker1.load());
-        assert_eq!((2, 2), test_waker2.load());
-
-        assert_eq!(Poll::Ready(3), fut2.as_mut().poll(&mut cx2));
-        assert_eq!((1, 1), test_waker1.load());
-        assert_eq!((1, 2), test_waker2.load());
+        let guard2 = fut2.as_mut().poll(&mut cx2);
+        assert!(guard2.is_ready());
+        assert_eq!((1, 0), test_waker1.load());
+        assert_eq!((1, 1), test_waker2.load());
     }
-    assert_eq!((1, 1), test_waker1.load());
-    assert_eq!((1, 2), test_waker2.load());
+    assert_eq!((1, 0), test_waker1.load());
+    assert_eq!((1, 1), test_waker2.load());
 }
 
 #[test]
-fn test_cancel() {
+fn test_cancel1() {
     let (test_waker1, waker1) = TestWaker::new();
     let (test_waker2, waker2) = TestWaker::new();
     let mut cx1 = Context::from_waker(&waker1);
     let mut cx2 = Context::from_waker(&waker2);
-    assert_eq!((1, 0), test_waker1.load());
-    assert_eq!((1, 0), test_waker2.load());
     let mutex = Mutex::new(1usize);
-    let cancel1 = Cancel::new();
-    let cancel2 = Cancel::new();
+    let guard;
     {
-        let fut1 = async {
-            let scope = mutex.scope();
-            scope.with(async {
-                let mut guard = scope.lock(&cancel1).await;
-                yield_now().await;
-                mem::drop(guard);
-            }).await;
-        };
-        let fut2 = async {
-            let scope = mutex.scope();
-            #[allow(unreachable_code)]
-                scope.with(async {
-                let mut guard = scope.lock(&cancel2).await;
-                unreachable!();
-                mem::drop(guard);
-            }).await;
-        };
+        let fut1 = mutex.lock();
+        let fut2 = mutex.lock();
         pin_mut!(fut1);
         pin_mut!(fut2);
 
-        assert_eq!(Poll::Pending, fut1.as_mut().poll(&mut cx1));
-        assert_eq!((2, 1), test_waker1.load());
+        guard = fut1.as_mut().poll(&mut cx1);
+        assert!(guard.is_ready());
+        assert_eq!((1, 0), test_waker1.load());
         assert_eq!((1, 0), test_waker2.load());
 
-        assert_eq!(Poll::Pending, fut2.as_mut().poll(&mut cx2));
-        assert_eq!((2, 1), test_waker1.load());
+        assert!(fut2.as_mut().poll(&mut cx2).is_pending());
+        assert_eq!((1, 0), test_waker1.load());
         assert_eq!((2, 0), test_waker2.load());
-
-        cancel2.set_cancelling();
-        cancel2.clear_pending();
-        assert_eq!(Poll::Pending, fut2.as_mut().poll(&mut cx2));
-        assert_eq!((1, 2), test_waker1.load());
-        assert_eq!((2, 0), test_waker2.load());
-        assert!(cancel2.pending());
-
-        assert_eq!(Poll::Ready(()), fut1.as_mut().poll(&mut cx1));
-        assert_eq!((1, 2), test_waker1.load());
-        assert_eq!((1, 1), test_waker2.load());
-
-        cancel2.clear_pending();
-        assert_eq!(Poll::Pending, fut2.as_mut().poll(&mut cx2));
-        assert_eq!((1, 2), test_waker1.load());
-        assert_eq!((1, 1), test_waker2.load());
-        assert!(!cancel2.pending());
     }
-    assert_eq!((1, 2), test_waker1.load());
+    assert_eq!((1, 0), test_waker1.load());
+    assert_eq!((1, 0), test_waker2.load());
+}
+
+#[test]
+fn test_wake_cancel2() {
+    let (test_waker1, waker1) = TestWaker::new();
+    let (test_waker2, waker2) = TestWaker::new();
+    let (test_waker3, waker3) = TestWaker::new();
+    let mut cx1 = Context::from_waker(&waker1);
+    let mut cx2 = Context::from_waker(&waker2);
+    let mut cx3 = Context::from_waker(&waker3);
+    let mutex = Mutex::new(1usize);
+    {
+        let mut fut1 = Box::pin(mutex.lock());
+        let mut fut2 = Box::pin(mutex.lock());
+        let mut fut3 = Box::pin(mutex.lock());
+
+        let guard = fut1.as_mut().poll(&mut cx1);
+        assert!(guard.is_ready());
+        assert_eq!((1, 0), test_waker1.load());
+        assert_eq!((1, 0), test_waker2.load());
+        assert_eq!((1, 0), test_waker3.load());
+
+        assert!(fut2.as_mut().poll(&mut cx2).is_pending());
+        assert_eq!((1, 0), test_waker1.load());
+        assert_eq!((2, 0), test_waker2.load());
+        assert_eq!((1, 0), test_waker3.load());
+
+        assert!(fut3.as_mut().poll(&mut cx3).is_pending());
+        assert_eq!((1, 0), test_waker1.load());
+        assert_eq!((2, 0), test_waker2.load());
+        assert_eq!((2, 0), test_waker3.load());
+
+        mem::drop(guard);
+        assert_eq!((1, 0), test_waker1.load());
+        assert_eq!((1, 1), test_waker2.load());
+        assert_eq!((2, 0), test_waker3.load());
+
+        mem::drop(fut2);
+        assert_eq!((1, 0), test_waker1.load());
+        assert_eq!((1, 1), test_waker2.load());
+        assert_eq!((1, 1), test_waker3.load());
+    }
+    assert_eq!((1, 0), test_waker1.load());
     assert_eq!((1, 1), test_waker2.load());
+    assert_eq!((1, 1), test_waker3.load());
 }
 
 #[test]
@@ -199,5 +193,5 @@ fn test_cancel_locally() {
 
 #[test]
 fn test_cancel_threaded() {
-    run_threaded(cancel_test(1000000, 1000000))
+    run_threaded(cancel_test(100000, 100000))
 }
