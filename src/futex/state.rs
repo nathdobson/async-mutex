@@ -1,11 +1,12 @@
 use std::task::{RawWakerVTable, Waker};
-use crate::waiter::Waiter;
+use crate::futex::waiter::Waiter;
 use std::{mem, ptr};
-use crate::atomic::Packable;
-use crate::atomic_impl::{AtomicUsize2, usize2};
+use crate::futex::atomic::Packable;
+use crate::futex::atomic_impl::{AtomicUsize2, usize2};
 use std::ptr::null;
 use std::mem::align_of;
 use std::fmt::Debug;
+use crate::sync::atomic::AtomicUsize;
 
 #[derive(Copy, Clone, Debug, Eq, PartialOrd, PartialEq, Ord)]
 pub struct CopyWaker(pub *const (), pub *const RawWakerVTable);
@@ -33,7 +34,8 @@ static WAITER_NONE_TAG: RawWakerVTable = PANIC_WAKER_VTABLE;
 static WAITER_DONE_TAG: RawWakerVTable = PANIC_WAKER_VTABLE;
 
 impl Packable for WaiterWaker {
-    type Impl = AtomicUsize2;
+    //type Impl = AtomicUsize2;
+    type Raw = usize2;
     unsafe fn encode(val: Self) -> usize2 {
         mem::transmute(match val {
             WaiterWaker::None => CopyWaker(null(), &WAITER_NONE_TAG),
@@ -54,7 +56,8 @@ impl Packable for WaiterWaker {
 }
 
 impl Packable for FutexAtom {
-    type Impl = AtomicUsize2;
+    // type Impl = AtomicUsize2;
+    type Raw = usize2;
     unsafe fn encode(val: Self) -> usize2 {
         mem::transmute(val)
     }
@@ -66,11 +69,11 @@ impl Packable for FutexAtom {
 
 #[cfg(test)]
 mod test {
-    use crate::atomic::Packable;
+    use crate::futex::atomic::Packable;
     use std::fmt::Debug;
-    use crate::state::{WaiterWaker, PANIC_WAKER_VTABLE, CopyWaker, FutexAtom};
+    use crate::futex::state::{WaiterWaker, PANIC_WAKER_VTABLE, CopyWaker, FutexAtom};
     use std::task::RawWakerVTable;
-    use crate::waiter::{Waiter, WaiterList};
+    use crate::futex::waiter::{Waiter, WaiterList};
     use std::mem::MaybeUninit;
     use crate::futex::FutexState;
 

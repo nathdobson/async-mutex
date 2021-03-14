@@ -1,4 +1,4 @@
-use crate::tests::test::{IsTest, simple_test, cancel_test};
+use crate::tests::test::{IsTest, simple_test, cancel_test, condvar_test, condvar_test_a};
 use crate::sync::Arc;
 use crate::thread;
 use crate::loom::model::Builder;
@@ -100,4 +100,25 @@ fn test_cancel_loom_0_2_INF() {
     let mut builder = Builder::new();
     builder.preemption_bound = None;
     run_loom(builder, cancel_test(0, 2));
+}
+
+#[test]
+fn test_condvar_A_4() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = Some(4);
+    run_loom(builder, condvar_test_a());
+}
+
+#[test]
+fn test_condvar_1_INF() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = None;
+    run_loom(builder, condvar_test(1));
+}
+
+#[test]
+fn test_condvar_2_2() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = Some(2);
+    run_loom(builder, condvar_test(2));
 }

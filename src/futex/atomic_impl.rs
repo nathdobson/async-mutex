@@ -5,9 +5,10 @@ use crate::sync::atomic::AtomicU32;
 use crate::sync::atomic::AtomicU64;
 #[cfg(target_has_atomic = "128")]
 use crate::sync::atomic::AtomicU128;
+use std::fmt::Debug;
 
-pub trait AtomicImpl {
-    type Raw: Copy;
+pub trait IsAtomic: Debug {
+    type Raw: Copy + HasAtomic<Impl=Self> + Debug;
     fn new(x: Self::Raw) -> Self;
     fn load_mut(&mut self) -> Self::Raw;
     fn store_mut(&mut self, raw: Self::Raw);
@@ -28,10 +29,13 @@ pub trait AtomicImpl {
     ) -> Result<Self::Raw, Self::Raw>;
 }
 
+pub trait HasAtomic: Debug {
+    type Impl: IsAtomic<Raw=Self> + Debug;
+}
 
 macro_rules! atomic_impl (
     ($imp:ty, $raw:ty) => {
-        impl AtomicImpl for $imp {
+        impl IsAtomic for $imp {
             type Raw = $raw;
             fn new(x: Self::Raw) -> Self { Self::new(x) }
             fn load_mut(&mut self) -> Self::Raw {
@@ -66,8 +70,13 @@ macro_rules! atomic_impl (
                 self.compare_exchange_weak(current, new, success, failure)
             }
         }
+        impl HasAtomic for $raw {
+            type Impl = $imp;
+        }
     }
 );
+
+
 
 atomic_impl!(AtomicUsize, usize);
 atomic_impl!(AtomicBool, bool);
@@ -99,4 +108,4 @@ pub type AtomicUsize2 = AtomicU128;
 pub type AtomicUsize2 = [PlatformDoesNotSupportDoubleWideCompareAndSwap; 0 - 1];
 
 #[allow(non_camel_case_types)]
-pub type usize2 = <AtomicUsize2 as AtomicImpl>::Raw;
+pub type usize2 = <AtomicUsize2 as IsAtomic>::Raw;

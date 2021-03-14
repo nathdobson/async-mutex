@@ -64,6 +64,7 @@ pub mod thread {
 pub mod future {
     pub use loom::future::*;
     pub use std::future::Future;
+    pub use std::future::poll_fn;
 }
 
 #[cfg(not(loom))]

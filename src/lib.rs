@@ -18,23 +18,24 @@
 #![feature(future_poll_fn)]
 #![feature(test)]
 #![feature(bool_to_option)]
+#![feature(associated_type_bounds)]
+#![feature(maybe_uninit_extra)]
 
 #[cfg(test)]
 extern crate test;
 
 pub(crate) use crate::loom::*;
 
-mod atomic;
 mod loom;
 mod util;
-mod atomic_impl;
 #[cfg(test)]
 mod tests;
-mod state;
-mod waiter;
-mod mutex;
-//mod condvar;
+pub mod fair_mutex;
+pub mod unfair_mutex;
 pub mod futex;
+pub mod spin_lock;
+pub mod condvar;
+pub mod mpsc;
 
-pub use mutex::Mutex;
-pub use mutex::MutexGuard;
+pub use fair_mutex::Mutex;
+pub use fair_mutex::MutexGuard;
