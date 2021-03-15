@@ -4,6 +4,12 @@ version = "0.1.0"
 authors = ["Nathan Dobson <nadobson@mac.com>"]
 edition = "2018"
 
+[features]
+default = []
+test_seconds = []
+test_minute = ["test_seconds"]
+
+
 [dependencies]
 #async-cancel = { path = "../async-cancel" }
 

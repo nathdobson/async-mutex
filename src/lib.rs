@@ -5,6 +5,7 @@
 #![allow(unused_unsafe)]
 #![deny(unused_must_use)]
 
+//#![feature(const_fn, const_generics)]
 #![feature(arbitrary_self_types)]
 #![feature(unboxed_closures)]
 #![feature(once_cell)]
@@ -20,6 +21,8 @@
 #![feature(bool_to_option)]
 #![feature(associated_type_bounds)]
 #![feature(maybe_uninit_extra)]
+#![feature(maybe_uninit_ref)]
+#![feature(never_type)]
 
 #[cfg(test)]
 extern crate test;
@@ -31,11 +34,13 @@ mod util;
 #[cfg(test)]
 mod tests;
 pub mod fair_mutex;
-pub mod unfair_mutex;
+//pub mod unfair_mutex;
 pub mod futex;
 pub mod spin_lock;
 pub mod condvar;
 pub mod mpsc;
+pub mod traits;
+//pub mod mpsc;
 
 pub use fair_mutex::Mutex;
 pub use fair_mutex::MutexGuard;

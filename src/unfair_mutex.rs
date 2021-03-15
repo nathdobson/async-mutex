@@ -17,7 +17,6 @@ use crate::futex::atomic::{Atomic, Packable};
 use crate::futex::atomic_impl::{AtomicUsize2, usize2};
 use crate::cell::UnsafeCell;
 use crate::futex::{EnterResult, Futex, WaitFuture};
-use crate::futex::WaitImpl;
 use crate::future::Future;
 use crate::sync::Arc;
 use crate::sync::atomic::AtomicBool;
@@ -29,7 +28,7 @@ use crate::futex::waiter::Waiter;
 
 #[derive(Debug)]
 pub struct Mutex<T> {
-    futex: Futex,
+    futex: Futex<()>,
     inner: UnsafeCell<T>,
 }
 
@@ -59,7 +58,7 @@ impl<T> Mutex<T> {
             let drop = OnDrop;
 
             let mut locked = false;
-            self.futex.wait(WaitImpl {
+            self.futex.wait((), WaitImpl {
                 enter: |userdata| match userdata {
                     UNLOCKED => {
                         locked = true;
@@ -78,7 +77,7 @@ impl<T> Mutex<T> {
                 phantom: PhantomData,
             }).await;
             while !locked {
-                self.futex.wait(WaitImpl {
+                self.futex.wait((), WaitImpl {
                     enter: |userdata| match userdata {
                         LOCKED_WAKING => {
                             test_println!("LOCKED_WAKING -> LOCKED");

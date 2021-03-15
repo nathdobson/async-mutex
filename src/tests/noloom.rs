@@ -1,6 +1,6 @@
 use crate::{thread, Mutex};
 use crate::sync::Arc;
-use crate::tests::test::{IsTest, simple_test, cancel_test, condvar_test};
+use crate::tests::test::{IsTest, simple_test, cancel_test, condvar_test, channel_test};
 use futures::executor::{LocalPool, ThreadPool};
 use crate::future::{block_on, Future, ready, poll_fn};
 use futures::task::{Spawn, SpawnExt};
@@ -13,8 +13,11 @@ use std::mem;
 use std::task::{Context, Poll};
 use crate::util::yield_now;
 use futures::pin_mut;
-use crate::tests::test_waker::TestWaker;
+use crate::tests::test_waker::{TestWaker, TestPool};
 use crate::condvar::Condvar;
+use crate::mpsc::channel;
+use Poll::Ready;
+use Poll::Pending;
 
 fn run_with_spawner<T: IsTest>(test: T, spawner: &dyn Spawn) -> impl Future {
     let mut state = Arc::new(test.start());
@@ -58,25 +61,39 @@ fn test_simple_threaded() {
     run_threaded(simple_test(10000));
 }
 
+//
+// #[test]
+// fn test_lock1() {
+//     let (test_waker, waker) = TestWaker::new();
+//     let mut cx = Context::from_waker(&waker);
+//     assert_eq!((1, 0), test_waker.load());
+//     let mutex = Mutex::new(1usize);
+//     {
+//         let fut = async {
+//             let mut guard = mutex.lock().await;
+//             ready(()).await;
+//             *guard += 1;
+//             *guard
+//         };
+//         pin_mut!(fut);
+//         assert_eq!(Poll::Ready(2), fut.poll(&mut cx));
+//     }
+//     assert_eq!((1, 0), test_waker.load());
+// }
 
 #[test]
 fn test_lock1() {
-    let (test_waker, waker) = TestWaker::new();
-    let mut cx = Context::from_waker(&waker);
-    assert_eq!((1, 0), test_waker.load());
-    let mutex = Mutex::new(1usize);
-    {
-        let fut = async {
-            let mut guard = mutex.lock().await;
-            ready(()).await;
-            *guard += 1;
-            *guard
-        };
-        pin_mut!(fut);
-        assert_eq!(Poll::Ready(2), fut.poll(&mut cx));
-    }
-    assert_eq!((1, 0), test_waker.load());
+    let mut pool = TestPool::new();
+    let mutex = Mutex::new(1);
+    let mut fut1 = pool.spawn(async {
+        let mut guard = mutex.lock().await;
+        ready(()).await;
+        *guard += 1;
+        *guard
+    });
+    assert_eq!((Poll::Ready(2), vec![]), pool.step(&mut fut1));
 }
+
 
 #[test]
 fn test_lock2() {
@@ -244,6 +261,46 @@ fn test_condvar_notify_once() {
 }
 
 #[test]
+fn test_channel_send_recv_1() {
+    let mut pool = TestPool::new();
+    let (sender, mut receiver) = channel(1);
+    let mut fut1 = pool.spawn(sender.send(1));
+    let mut fut2 = pool.spawn(receiver.recv());
+    assert_eq!((Ready(()), vec![]), pool.step(&mut fut1));
+    assert_eq!((Ready(1), vec![]), pool.step(&mut fut2));
+}
+
+#[test]
+fn test_channel_recv_send_1() {
+    let mut pool = TestPool::new();
+    let (sender, mut receiver) = channel(1);
+    let mut fut0 = pool.spawn(receiver.recv());
+    let mut fut1 = pool.spawn(sender.send(1));
+    assert_eq!((Pending, vec![]), pool.step(&mut fut0));
+    assert_eq!((Ready(()), vec![0]), pool.step(&mut fut1));
+    assert_eq!((Ready(1), vec![]), pool.step(&mut fut0));
+    println!("{:?}", sender);
+}
+
+#[test]
+fn test_channel_recv_send_2() {
+    let mut pool = TestPool::new();
+    let (sender, mut receiver) = channel(1);
+    let mut fut0 = pool.spawn(async {
+        assert_eq!(1, receiver.recv().await);
+        assert_eq!(2, receiver.recv().await);
+    });
+    let mut fut1 = pool.spawn(async {
+        sender.send(1).await;
+        sender.send(2).await;
+    });
+    assert_eq!((Pending, vec![]), pool.step(&mut fut0));
+    assert_eq!((Pending, vec![0]), pool.step(&mut fut1));
+    assert_eq!((Ready(()), vec![1]), pool.step(&mut fut0));
+    assert_eq!((Ready(()), vec![]), pool.step(&mut fut1));
+}
+
+#[test]
 fn test_cancel_locally() {
     run_locally(cancel_test(100, 100))
 }
@@ -261,4 +318,14 @@ fn test_condvar_locally() {
 #[test]
 fn test_condvar_threaded() {
     run_threaded(condvar_test(10000))
+}
+
+#[test]
+fn test_channel_locally() {
+    run_locally(channel_test(&[2], 1))
+}
+
+#[test]
+fn test_channel_threaded() {
+    run_threaded(channel_test(&[10000; 10], 100))
 }

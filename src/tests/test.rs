@@ -13,6 +13,11 @@ use futures::poll;
 use std::mem;
 use crate::condvar::Condvar;
 use std::collections::HashSet;
+use crate::mpsc;
+use crate::mpsc::Receiver;
+use crate::mpsc::Sender;
+use std::mem::MaybeUninit;
+use crate::cell::UnsafeCell;
 
 #[derive(Copy, Clone)]
 pub struct Test<Start, Run, Stop>
@@ -186,5 +191,45 @@ pub fn condvar_test(count: usize) -> impl IsTest {
         stop: move |mut pair, _| {
             assert_eq!((0..count).collect::<HashSet<_>>(), *pair.0.get_mut());
         },
+    }
+}
+
+pub fn channel_test(senders: &'static [usize], cap: usize) -> impl IsTest {
+    #[derive(Debug, Clone)]
+    struct Message {
+        task: usize,
+        seq: Box<usize>,
+    }
+    struct ReceiverBox(UnsafeCell<Option<Receiver<Message>>>);
+    unsafe impl Sync for ReceiverBox {}
+    unsafe impl Send for ReceiverBox {}
+
+    Test {
+        tasks: senders.len() + 1,
+        start: move || -> (Sender<Message>, ReceiverBox){
+            test_println!("Creating channel");
+            let (sender, receiver) = mpsc::channel(cap);
+            (sender, ReceiverBox(UnsafeCell::new(Some(receiver))))
+        },
+        run: move |pair: Arc<(Sender<Message>, ReceiverBox)>, task| async move {
+            if task == senders.len() {
+                let mut receiver = unsafe { pair.1.0.with_mut(|x| (*x).take()).unwrap() };
+                let mut received = vec![vec![]; senders.len()];
+                for i in 0..senders.iter().sum::<usize>() {
+                    let message = receiver.recv().await;
+                    test_println!("Received {:?}", message);
+                    received[message.task].push(*message.seq);
+                }
+                let expected: Vec<Vec<usize>> = senders.iter().map(|x| (0..*x).collect()).collect();
+            } else {
+                for seq in 0..senders[task] {
+                    let msg = Message { task, seq: Box::new(seq) };
+                    test_println!("Sending {:?}", msg);
+                    pair.0.send(msg.clone()).await;
+                    test_println!("Sent {:?}", msg);
+                }
+            }
+        },
+        stop: move |mut pair, _| {},
     }
 }

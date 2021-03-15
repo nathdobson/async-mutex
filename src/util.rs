@@ -161,12 +161,3 @@ macro_rules! test_println {
         //println!($($xs)*)
     }
 }
-
-pub fn bad_cancel() -> ! {
-    eprintln!("Attempted to drop future before canceling completed: aborting.");
-    let bt = Backtrace::capture();
-    if bt.status() == BacktraceStatus::Captured {
-        eprintln!("{}", bt);
-    }
-    abort();
-}

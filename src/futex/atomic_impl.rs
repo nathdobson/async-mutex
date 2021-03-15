@@ -109,3 +109,15 @@ pub type AtomicUsize2 = [PlatformDoesNotSupportDoubleWideCompareAndSwap; 0 - 1];
 
 #[allow(non_camel_case_types)]
 pub type usize2 = <AtomicUsize2 as IsAtomic>::Raw;
+
+#[allow(non_camel_case_types)]
+#[cfg(all(target_pointer_width = "16"))]
+pub type usize_half = u8;
+
+#[allow(non_camel_case_types)]
+#[cfg(all(target_pointer_width = "32"))]
+pub type usize_half = u16;
+
+#[allow(non_camel_case_types)]
+#[cfg(all(target_pointer_width = "64"))]
+pub type usize_half = u32;

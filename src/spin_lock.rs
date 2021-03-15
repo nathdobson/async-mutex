@@ -2,7 +2,7 @@ use crate::cell::UnsafeCell;
 use crate::futex::atomic::Atomic;
 use crate::sync::atomic::Ordering::{Acquire, Relaxed};
 use crate::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering::Release;
+use crate::sync::atomic::Ordering::Release;
 use std::ops::{Deref, DerefMut};
 use crate::util::yield_now;
 

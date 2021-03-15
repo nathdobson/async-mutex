@@ -16,20 +16,19 @@ use std::task::Waker;
 use crate::futex::atomic::{Atomic, Packable};
 use crate::futex::atomic_impl::{AtomicUsize2, usize2};
 use crate::cell::UnsafeCell;
-use crate::futex::{EnterResult, Futex, WaitFuture};
-use crate::futex::WaitImpl;
+use crate::futex::{Futex, WaitFuture, WaitAction, Flow};
 use crate::future::Future;
 use crate::sync::Arc;
 use crate::sync::atomic::AtomicBool;
 use crate::sync::atomic::AtomicUsize;
 use crate::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use crate::test_println;
-use crate::util::{AsyncFnOnce, bad_cancel, Bind, FnOnceExt};
+use crate::util::{AsyncFnOnce, Bind, FnOnceExt};
 use crate::futex::waiter::Waiter;
 
 #[derive(Debug)]
 pub struct Mutex<T> {
-    pub(crate) futex: Futex,
+    pub(crate) futex: Futex<()>,
     inner: UnsafeCell<T>,
 }
 
@@ -50,24 +49,25 @@ impl<T> Mutex<T> {
     pub async fn lock<'a>(&'a self) -> MutexGuard<'a, T> {
         unsafe {
             let mut flipped = false;
-            let guard = self.futex.wait(WaitImpl {
-                enter: |locked| if locked == 0 {
-                    flipped = true;
-                    EnterResult { userdata: Some(1), pending: false }
-                } else {
-                    flipped = false;
-                    EnterResult { userdata: None, pending: true }
+            if let Flow::Ready(_) = self.futex.wait(
+                (),
+                |locked| {
+                    if locked == 0 {
+                        WaitAction { update: Some(1), flow: Flow::Ready(()) }
+                    } else {
+                        WaitAction { update: None, flow: Flow::Pending(()) }
+                    }
                 },
-                post_enter: Some(|| {}),
-                exit: || MutexGuard { mutex: self },
-                phantom: PhantomData::<usize>,
-            }).await;
-            if flipped {
+                |_, _| (),
+                |_, _| self.unlock(),
+                |_, _| (),
+            ).await.0 {
                 test_println!("Flipped on");
             }
-            guard
+            MutexGuard { mutex: self }
         }
     }
+
     pub(crate) unsafe fn unlock(&self) {
         test_println!("Unlocking");
         let state = self.futex.lock_state();

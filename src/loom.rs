@@ -94,6 +94,9 @@ pub mod cell {
         pub unsafe fn with_mut<F, R>(&self, f: F) -> R where F: FnOnce(*mut T) -> R {
             f(self.0.get())
         }
+        pub fn into_inner(self) -> T {
+            self.0.into_inner()
+        }
         #[cfg(not(loom))]
         pub unsafe fn get_mut(&mut self) -> &mut T {
             self.0.get_mut()

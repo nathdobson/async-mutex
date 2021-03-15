@@ -1,24 +1,30 @@
 use crate::sync::Arc;
 use crate::cell::UnsafeCell;
 use crate::futex::atomic::{Packable, Atomic};
-use crate::futex::{Futex, WaitImpl, EnterResult};
-use crate::futex::state::CopyWaker;
-use crate::futex::atomic_impl::{usize2, IsAtomic};
+use crate::futex::{Futex, WaitAction, Flow};
+use crate::futex::state::{CopyWaker, PANIC_WAKER_VTABLE};
+use crate::futex::atomic_impl::{usize2, IsAtomic, usize_half};
 use crate::sync::atomic::AtomicBool;
 use std::marker::PhantomData;
-use std::sync::atomic::Ordering::AcqRel;
+use crate::sync::atomic::Ordering::AcqRel;
 use crate::future::poll_fn;
 use crate::sync::atomic::Ordering::Release;
 use std::mem::MaybeUninit;
-use std::task::Poll;
+use std::task::{Poll, RawWakerVTable};
 use crate::sync::atomic::Ordering::Acquire;
 use std::iter::repeat_with;
 use crate::sync::atomic::Ordering::Relaxed;
+use std::mem;
+use std::ptr::null;
+use crate::test_println;
 
+#[derive(Clone, Debug)]
 pub struct Sender<T>(Arc<Inner<T>>);
 
+#[derive(Debug)]
 pub struct Receiver<T>(Arc<Inner<T>>);
 
+#[derive(Debug)]
 struct Bucket<T> {
     filled: AtomicBool,
     data: UnsafeCell<MaybeUninit<T>>,
@@ -26,7 +32,7 @@ struct Bucket<T> {
 
 #[derive(Clone, Copy, Debug)]
 struct SendState {
-    index: usize,
+    write_head: usize,
     size: usize,
 }
 
@@ -36,9 +42,10 @@ enum RecvState {
     Dirty,
 }
 
+#[derive(Debug)]
 struct Inner<T> {
     buckets: Vec<Bucket<T>>,
-    send_queue: Futex,
+    send_queue: Futex<Option<T>>,
     recv_state: Atomic<RecvState>,
     recv_head: UnsafeCell<usize>,
 }
@@ -50,6 +57,8 @@ pub fn channel<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
 
 impl<T> Inner<T> {
     pub fn new(cap: usize) -> Self {
+        assert!(cap > 0);
+        assert!(cap <= usize_half::MAX as usize);
         let buckets =
             repeat_with(|| Bucket {
                 filled: AtomicBool::new(false),
@@ -59,36 +68,41 @@ impl<T> Inner<T> {
                 .collect();
         Inner {
             buckets,
-            send_queue: Futex::new(SendState { index: 0, size: 0 }),
+            send_queue: Futex::new(SendState { write_head: 0, size: 0 }),
             recv_state: Atomic::new(RecvState::Dirty),
             recv_head: UnsafeCell::new(0),
         }
     }
+
     pub async unsafe fn send(&self, msg: T) {
-        let mut bucket_index = None;
-        self.send_queue.wait(WaitImpl {
-            enter: |state: SendState| {
-                if state.size == self.buckets.len() {
-                    bucket_index = None;
-                    EnterResult { userdata: None, pending: true }
+        let cap = self.buckets.len();
+        let (selected, msg) = self.send_queue.wait(
+            Some(msg),
+            |mut state: SendState| {
+                if state.size < cap {
+                    let selected = state.write_head;
+                    state.write_head = (state.write_head + 1) % cap;
+                    state.size += 1;
+                    WaitAction { update: Some(state), flow: Flow::Ready(selected) }
                 } else {
-                    bucket_index = Some(state.index);
-                    EnterResult { userdata: Some(SendState { index: state.index + 1, size: state.size + 1 }), pending: false }
+                    WaitAction { update: None, flow: Flow::Pending(()) }
                 }
             },
-            post_enter: Some(|| {}),
-            exit: || {},
-            phantom: PhantomData,
-        }).await;
-        if let Some(bucket_index) = bucket_index {
-            self.buckets[bucket_index].data.with_mut(|data|
+            |_, _| (),
+            |msg, _| assert!(msg.is_none()),
+            |msg, _| assert!(msg.is_some()),
+        ).await;
+        if let Flow::Ready(selected) = selected {
+            let msg = msg.unwrap();
+            self.buckets[selected].data.with_mut(|data|
                 (*data).write(msg)
             );
-            self.buckets[bucket_index].filled.store(true, Release);
+            self.buckets[selected].filled.store(true, Release);
             match self.recv_state.swap(RecvState::Dirty, AcqRel) {
                 RecvState::Waiting(waker) => waker.into_waker().wake(),
                 RecvState::Dirty => {}
             }
+            test_println!("Filled {:?}", &self.buckets[selected] as *const Bucket<T>);
         }
     }
     pub async unsafe fn recv(&self) -> T {
@@ -96,32 +110,40 @@ impl<T> Inner<T> {
             let head = self.recv_head.with_mut(|x| *x);
             let bucket = &self.buckets[head] as *const Bucket<T>;
             if !(*bucket).filled.load(Acquire) {
-                self.recv_state.store(RecvState::Waiting(CopyWaker::from_waker(cx.waker().clone())), Release);
+                match self.recv_state.swap(RecvState::Waiting(CopyWaker::from_waker(cx.waker().clone())), AcqRel) {
+                    RecvState::Waiting(old) => mem::drop(old.into_waker()),
+                    RecvState::Dirty => {}
+                }
                 if !(*bucket).filled.load(Acquire) {
+                    test_println!("Receive blocked {:?}", bucket);
                     return Poll::Pending;
+                }
+                match self.recv_state.swap(RecvState::Dirty, AcqRel) {
+                    RecvState::Waiting(old) => mem::drop(old.into_waker()),
+                    RecvState::Dirty => {}
                 }
             }
             let bucket = bucket as *mut Bucket<T>;
             (*bucket).filled.store_mut(false);
+            test_println!("Unfilled {:?}", head);
             let result = (*bucket).data.with_mut(|x| (*x).assume_init_read());
-            self.recv_head.with_mut(|x| *x = head + 1);
+            self.recv_head.with_mut(|x| *x = (head + 1) % self.buckets.len());
             let lock = self.send_queue.lock_state();
             let waiter = lock.with_mut(|state| {
-                if let Some(waiter) = self.send_queue.pop(&mut *state) {
-                    return Some(waiter);
-                }
                 self.send_queue.update_flip(&mut *state, |atom: SendState, queued| {
-                    if !queued {
-                        Some(SendState { index: atom.index, size: atom.size - 1 })
+                    if queued {
+                        assert_eq!(atom.size, self.buckets.len());
+                        Some(SendState { write_head: (atom.write_head + 1) % self.buckets.len(), size: atom.size })
                     } else {
-                        None
+                        Some(SendState { write_head: atom.write_head, size: atom.size - 1 })
                     }
                 });
                 self.send_queue.pop(&mut *state)
             });
             if let Some(waiter) = waiter {
                 (*bucket).filled.store_mut(true);
-                (*bucket).data.with_mut(|x| (*x).write(todo!()));
+                test_println!("Backfilled {:?}",head);
+                (*bucket).data.with_mut(|x| (*x).write(waiter.message().with_mut(|x| (*x).take().unwrap())));
                 waiter.done();
             }
             Poll::Ready(result)
@@ -129,14 +151,59 @@ impl<T> Inner<T> {
     }
 }
 
+impl<T> Receiver<T> {
+    pub async fn recv(&mut self) -> T {
+        unsafe { self.0.recv().await }
+    }
+}
+
+impl<T> Sender<T> {
+    pub async fn send(&self, msg: T) {
+        unsafe { self.0.send(msg).await }
+    }
+}
+
 impl Packable for SendState {
     type Raw = usize;
-    unsafe fn encode(val: Self) -> Self::Raw { todo!() }
-    unsafe fn decode(val: Self::Raw) -> Self { todo!() }
+    unsafe fn encode(val: Self) -> Self::Raw {
+        mem::transmute((val.size as usize_half, val.write_head as usize_half))
+    }
+    unsafe fn decode(val: Self::Raw) -> Self {
+        let (size, write_head): (usize_half, usize_half) = mem::transmute(val);
+        Self { size: size as usize, write_head: write_head as usize }
+    }
 }
+
+static WAITER_NONE_TAG: RawWakerVTable = PANIC_WAKER_VTABLE;
 
 impl Packable for RecvState {
     type Raw = usize2;
-    unsafe fn encode(val: Self) -> Self::Raw { todo!() }
-    unsafe fn decode(val: Self::Raw) -> Self { todo!() }
+    unsafe fn encode(val: Self) -> Self::Raw {
+        mem::transmute(match val {
+            RecvState::Waiting(waker) => waker,
+            RecvState::Dirty => CopyWaker(null(), &WAITER_NONE_TAG)
+        })
+    }
+    unsafe fn decode(val: Self::Raw) -> Self {
+        let waker: CopyWaker = mem::transmute(val);
+        if waker.1 == &WAITER_NONE_TAG as *const RawWakerVTable {
+            RecvState::Dirty
+        } else {
+            RecvState::Waiting(waker)
+        }
+    }
 }
+
+impl<T> Drop for Inner<T> {
+    fn drop(&mut self) {
+        match self.recv_state.load_mut() {
+            RecvState::Waiting(_) => panic!(),
+            RecvState::Dirty => {}
+        }
+    }
+}
+
+
+unsafe impl<T: Send> Send for Inner<T> {}
+
+unsafe impl<T: Send> Sync for Inner<T> {}

@@ -23,16 +23,17 @@ use crate::sync::RwLock;
 use crate::sync::atomic::Ordering::Relaxed;
 use crate::test_println;
 use std::marker::PhantomData;
+use std::fmt::Debug;
 
 #[derive(Debug)]
-pub struct FutexState {
-    queue: WaiterList
+pub struct FutexState<M> {
+    queue: WaiterList<M>
 }
 
 #[derive(Debug)]
-pub struct Futex {
-    atom: Atomic<FutexAtom>,
-    state: RwLock<UnsafeCell<FutexState>>,
+pub struct Futex<M> {
+    atom: Atomic<FutexAtom<M>>,
+    state: RwLock<UnsafeCell<FutexState<M>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -42,56 +43,98 @@ enum WaitFutureStep {
     Done,
 }
 
-pub struct RequeueResult<A> {
+pub struct RequeueResult<M, A> {
     pub(crate) userdata: Option<A>,
-    pub(crate) list: WaiterList,
+    pub(crate) list: WaiterList<M>,
 }
 
-pub struct EnterResult<A> {
-    pub(crate) userdata: Option<A>,
-    pub(crate) pending: bool,
+pub enum Flow<R, P> {
+    Ready(R),
+    Pending(P),
 }
 
-pub struct WaitImpl<A, Enter, PostEnter, Exit> {
-    pub enter: Enter,
-    pub post_enter: Option<PostEnter>,
-    pub exit: Exit,
-    pub phantom: PhantomData<A>,
+pub struct WaitAction<A, R, P> {
+    pub update: Option<A>,
+    pub flow: Flow<R, P>,
 }
 
-pub trait Wait {
-    type Atom: Packable<Raw=usize>;
-    type Output;
-    fn enter(&mut self, userdata: Self::Atom) -> EnterResult<Self::Atom>;
-    fn post_enter(&mut self);
-    fn exit(self) -> Self::Output;
-}
-
-impl<A, Enter, PostEnter, Exit> Wait for WaitImpl<A, Enter, PostEnter, Exit> where
-    A: Packable<Raw=usize>,
-    Enter: FnMut(A) -> EnterResult<A>,
-    PostEnter: FnOnce(),
-    Exit: FnOnce<()>
-{
-    type Atom = A;
-    type Output = Exit::Output;
-    fn enter(&mut self, userdata: A) -> EnterResult<A> { (self.enter)(userdata) }
-    fn post_enter(&mut self) { (self.post_enter.take().unwrap())(); }
-    fn exit(self) -> Self::Output { (self.exit)() }
-}
+// pub struct WaitImpl<Call, OnPending, OnCancelWoken, OnCancelSleeping> {
+//     pub call: Call,
+//     pub on_pending: OnPending,
+//     pub on_cancel_woken: OnCancelWoken,
+//     pub on_cancel_sleeping: OnCancelSleeping,
+// }
+//
+// pub trait Wait<M, A, R, P> where A: Packable<Raw=usize> {
+//     fn call(&mut self, userdata: A) -> WaitAction<A, R, P>;
+//     fn on_pending(&mut self, msg: &M, pending: &mut P);
+//     fn on_cancel_woken(self, msg: M, pending: P);
+//     fn on_cancel_sleeping(self, msg: M, pending: P);
+// }
+//
+// pub fn wait_impl<M, A, R, P, Call, OnPending, OnCancelWoken, OnCancelSleeping>(
+//     call: Call,
+//     on_pending: OnPending,
+//     on_cancel_woken: OnCancelWoken,
+//     on_cancel_sleeping: OnCancelSleeping,
+// ) -> impl Wait<M, A, R, P>
+//     where
+//         A: Packable<Raw=usize>,
+//         Call: FnMut(A) -> WaitAction<A, R, P>,
+//         OnPending: for<'a> FnMut(&'a M, &'a mut P),
+//         OnCancelWoken: FnOnce(M, P),
+//         OnCancelSleeping: FnOnce(M, P),
+// {
+//     WaitImpl { call, on_pending, on_cancel_woken, on_cancel_sleeping }
+// }
+//
+// impl<M, A, R, P, Call, OnPending, OnCancelWoken, OnCancelSleeping>
+// Wait<M, A, R, P> for
+// WaitImpl<Call, OnPending, OnCancelWoken, OnCancelSleeping> where
+//     A: Packable<Raw=usize>,
+//     Call: FnMut(A) -> WaitAction<A, R, P>,
+//     OnPending: for<'a> FnMut(&'a M, &'a mut P),
+//     OnCancelWoken: FnOnce(M, P),
+//     OnCancelSleeping: FnOnce(M, P),
+// {
+//     fn call(&mut self, userdata: A) -> WaitAction<A, R, P> {
+//         (self.call)(userdata)
+//     }
+//     fn on_pending(&mut self, msg: &M, pending: &mut P) {
+//         (self.on_pending)(msg, pending)
+//     }
+//     fn on_cancel_woken(self, msg: M, pending: P) {
+//         (self.on_cancel_woken)(msg, pending)
+//     }
+//     fn on_cancel_sleeping(self, msg: M, pending: P) {
+//         (self.on_cancel_sleeping)(msg, pending)
+//     }
+// }
 
 #[must_use = "with does nothing unless polled/`await`-ed"]
-pub struct WaitFuture<'a, W: Wait> {
-    original_futex: &'a Futex,
+pub struct WaitFuture<'a, M, A, R, P, Call, OnPending, OnCancelWoken, OnCancelSleeping>
+    where
+        A: Packable<Raw=usize>,
+        Call: FnMut(A) -> WaitAction<A, R, P>,
+        OnPending: for<'b> FnMut(&'b UnsafeCell<M>, &'b mut P),
+        OnCancelWoken: FnOnce(M, P),
+        OnCancelSleeping: FnOnce(M, P),
+{
+    original_futex: &'a Futex<M>,
     step: WaitFutureStep,
     // TODO MaybeUninit isn't exactly right here: the wrapper should communicate to
     // the compiler that it is unsafe to convert a `&mut LockFuture` to a `&mut Waiter`,
     // while it is safe to convert an `&mut LockFuture` to a `&Waiter`.
-    waiter: MaybeUninit<Waiter>,
-    wait: Option<W>,
+    waiter: MaybeUninit<Waiter<M>>,
+    call: Call,
+    on_pending: OnPending,
+    on_cancel_woken: Option<OnCancelWoken>,
+    on_cancel_sleeping: Option<OnCancelSleeping>,
+    result: Option<P>,
+    phantom: PhantomData<(A, R)>,
 }
 
-impl Futex {
+impl<M> Futex<M> {
     pub fn new<T: Packable<Raw=usize>>(userdata: T) -> Self {
         unsafe {
             Futex {
@@ -105,15 +148,51 @@ impl Futex {
     pub unsafe fn load<A: Packable<Raw=usize>>(&self, order: Ordering) -> A {
         A::decode(self.atom.load(order).userdata)
     }
-    pub unsafe fn wait<W: Wait>(&self, wait: W) -> WaitFuture<W> {
+
+    pub unsafe fn wait<A, R, P, Call, OnPending, OnCancelWoken, OnCancelSleeping>(
+        &self,
+        message: M,
+        call: Call,
+        on_pending: OnPending,
+        on_cancel_woken: OnCancelWoken,
+        on_cancel_sleeping: OnCancelSleeping,
+    ) -> WaitFuture<M, A, R, P, Call, OnPending, OnCancelWoken, OnCancelSleeping> where
+        A: Packable<Raw=usize>,
+        Call: FnMut(A) -> WaitAction<A, R, P>,
+        OnPending: for<'a> FnMut(&'a UnsafeCell<M>, &'a mut P),
+        OnCancelWoken: FnOnce(M, P),
+        OnCancelSleeping: FnOnce(M, P),
+    {
         WaitFuture {
             original_futex: self,
             step: WaitFutureStep::Enter,
-            waiter: MaybeUninit::new(Waiter::new()),
-            wait: Some(wait),
+            waiter: MaybeUninit::new(Waiter::new(message)),
+            call,
+            on_pending,
+            on_cancel_woken: Some(on_cancel_woken),
+            on_cancel_sleeping: Some(on_cancel_sleeping),
+            result: None,
+            phantom: PhantomData,
         }
     }
-    pub unsafe fn lock_state(&self) -> RwLockReadGuard<UnsafeCell<FutexState>> {
+    // pub unsafe fn wait_impl<A, R, P, W>(
+    //     &self,
+    //     message: M,
+    //     wait: W,
+    // ) -> WaitFuture<M, A, R, P, W> where
+    //     A: Packable<Raw=usize>,
+    //     W: Wait<M, A, R, P>
+    // {
+    //     WaitFuture {
+    //         original_futex: self,
+    //         step: WaitFutureStep::Entering,
+    //         waiter: MaybeUninit::new(Waiter::new(message)),
+    //         wait: Some(wait),
+    //         result: None,
+    //         phantom: PhantomData,
+    //     }
+    // }
+    pub unsafe fn lock_state(&self) -> RwLockReadGuard<UnsafeCell<FutexState<M>>> {
         self.state.read().unwrap()
     }
 
@@ -121,10 +200,11 @@ impl Futex {
     /// is flipped.
     pub unsafe fn update_flip<A, F>(
         &self,
-        state: &mut FutexState,
+        state: &mut FutexState<M>,
         mut update: F,
     ) -> bool
-        where A: Packable<Raw=usize>, F: FnMut(A, bool) -> Option<A>
+        where A: Packable<Raw=usize> + Debug,
+              F: FnMut(A, bool) -> Option<A>
     {
         let mut atom = self.atom.load(Acquire);
         loop {
@@ -160,16 +240,16 @@ impl Futex {
         }
     }
 
-    pub unsafe fn pop(&self, state: &mut FutexState) -> Option<*const Waiter> {
+    pub unsafe fn pop(&self, state: &mut FutexState<M>) -> Option<*const Waiter<M>> {
         state.queue.pop()
     }
 
-    pub unsafe fn pop_many(&self, state: &mut FutexState, count: usize) -> WaiterList {
+    pub unsafe fn pop_many(&self, state: &mut FutexState<M>, count: usize) -> WaiterList<M> {
         test_println!("Queue is {:?}", state.queue);
         state.queue.pop_many(count)
     }
 
-    unsafe fn cancel(&self, state: &mut FutexState, waiter: *const Waiter) {
+    unsafe fn cancel(&self, state: &mut FutexState<M>, waiter: *const Waiter<M>) {
         test_println!("Canceling {:?}", waiter);
         let mut atom = self.atom.load(Acquire);
         loop {
@@ -188,7 +268,7 @@ impl Futex {
         state.queue.remove(waiter);
     }
 
-    pub unsafe fn requeue(&self, from: &Futex, list: WaiterList) {
+    pub unsafe fn requeue(&self, from: &Futex<M>, list: WaiterList<M>) {
         if list.empty() {
             return;
         }
@@ -238,48 +318,62 @@ impl Futex {
     // }
 }
 
-impl<'a, W: Wait> WaitFuture<'a, W> {
-    unsafe fn poll_enter(&mut self, cx: &mut Context) -> Poll<W::Output> {
+impl<'a, M, A, R, P, Call, OnPending, OnCancelWoken, OnCancelSleeping>
+WaitFuture<'a, M, A, R, P, Call, OnPending, OnCancelWoken, OnCancelSleeping>
+    where
+        A: Packable<Raw=usize>,
+        Call: FnMut(A) -> WaitAction<A, R, P>,
+        OnPending: for<'b> FnMut(&'b UnsafeCell<M>, &'b mut P),
+        OnCancelWoken: FnOnce(M, P),
+        OnCancelSleeping: FnOnce(M, P),
+{
+    unsafe fn poll_enter(&mut self, cx: &mut Context) -> Poll<(Flow<R, P>, M)> {
         let mut atom = self.original_futex.atom.load(Acquire);
-        //TODO(skip this once)
+//TODO(skip this once)
         let waker = CopyWaker::from_waker(cx.waker().clone());
         loop {
-            let result = self.wait.as_mut().unwrap().enter(W::Atom::decode(atom.userdata));
-            if result.pending {
-                let waiter = self.waiter.as_mut_ptr();
-                (waiter as *const Waiter).set_prev(atom.inbox);
-                waiter.waker_mut().store_mut(WaiterWaker::Waiting { waker });
-                waiter.futex_mut().store_mut(FutexOwner { first: null(), second: self.original_futex });
-                let mut userdata =
-                    if let Some(encoded) = result.userdata {
-                        W::Atom::encode(encoded)
+            let result = (self.call)(A::decode(atom.userdata));
+            match result.flow {
+                Flow::Ready(control) => {
+                    if let Some(userdata) = result.update {
+                        let new_atom = FutexAtom { userdata: A::encode(userdata), ..atom };
+                        if self.original_futex.atom.cmpxchg_weak(&mut atom, new_atom, AcqRel, Acquire) {
+                            test_println!("{:?} -> {:?}", atom, new_atom);
+                            mem::drop(waker.into_waker());
+                            self.step = WaitFutureStep::Done;
+                        } else {
+                            continue;
+                        }
                     } else {
-                        atom.userdata
-                    };
-                let new_atom = FutexAtom { inbox: waiter, userdata };
-                if self.original_futex.atom.cmpxchg_weak(&mut atom, new_atom, AcqRel, Acquire) {
-                    test_println!("{:?} -> {:?}", atom, new_atom);
-                    self.wait.as_mut().unwrap().post_enter();
-                    self.step = WaitFutureStep::Waiting;
-                    return Poll::Pending;
+                        mem::drop(waker.into_waker());
+                    }
+                    return Poll::Ready((Flow::Ready(control), self.waiter.assume_init_mut().take_message()));
                 }
-            } else {
-                if let Some(userdata) = result.userdata {
-                    let new_atom = FutexAtom { userdata: W::Atom::encode(userdata), ..atom };
+                Flow::Pending(mut control) => {
+                    let mut waiter = self.waiter.as_mut_ptr();
+                    (waiter as *const Waiter<M>).set_prev(atom.inbox);
+                    waiter.waker_mut().store_mut(WaiterWaker::Waiting { waker });
+                    waiter.futex_mut().store_mut(FutexOwner { first: null(), second: self.original_futex });
+                    let mut userdata =
+                        if let Some(encoded) = result.update {
+                            A::encode(encoded)
+                        } else {
+                            atom.userdata
+                        };
+                    let new_atom = FutexAtom { inbox: waiter, userdata };
                     if self.original_futex.atom.cmpxchg_weak(&mut atom, new_atom, AcqRel, Acquire) {
                         test_println!("{:?} -> {:?}", atom, new_atom);
-                        mem::drop(waker.into_waker());
-                        self.step = WaitFutureStep::Done;
-                        return Poll::Ready(self.wait.take().unwrap().exit());
+                        self.step = WaitFutureStep::Waiting;
+                        (self.on_pending)(self.waiter.as_ptr().message(), &mut control);
+                        self.result = Some(control);
+                        return Poll::Pending;
                     }
-                } else {
-                    mem::drop(waker.into_waker());
-                    return Poll::Ready(self.wait.take().unwrap().exit());
                 }
             }
         }
     }
-    unsafe fn poll_waiting(&mut self, cx: &mut Context) -> Poll<W::Output> {
+
+    unsafe fn poll_waiting(&mut self, cx: &mut Context) -> Poll<(Flow<R, P>, M)> {
         let new_waker = CopyWaker::from_waker(cx.waker().clone());
         let mut waker = self.waiter.as_ptr().waker().load(Acquire);
         loop {
@@ -295,16 +389,25 @@ impl<'a, W: Wait> WaitFuture<'a, W> {
                 WaiterWaker::Done => {
                     mem::drop(new_waker.into_waker());
                     self.step = WaitFutureStep::Done;
-                    return Poll::Ready(self.wait.take().unwrap().exit());
+                    return Poll::Ready((Flow::Pending(self.result.take().unwrap()),
+                                        self.waiter.assume_init_mut().take_message()),
+                    );
                 }
             }
         }
     }
 }
 
-impl<'a, W: Wait> Future for WaitFuture<'a, W> {
-    type Output = W::Output;
-
+impl<'a, M, A, R, P, Call, OnPending, OnCancelWoken, OnCancelSleeping>
+Future for WaitFuture<'a, M, A, R, P, Call, OnPending, OnCancelWoken, OnCancelSleeping>
+    where
+        A: Packable<Raw=usize>,
+        Call: FnMut(A) -> WaitAction<A, R, P>,
+        OnPending: for<'b> FnMut(&'b UnsafeCell<M>, &'b mut P),
+        OnCancelWoken: FnOnce(M, P),
+        OnCancelSleeping: FnOnce(M, P),
+{
+    type Output = (Flow<R, P>, M);
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         unsafe {
             let this = self.get_unchecked_mut();
@@ -317,13 +420,19 @@ impl<'a, W: Wait> Future for WaitFuture<'a, W> {
     }
 }
 
-impl<'a, W: Wait> Drop for WaitFuture<'a, W> {
+impl<'a, M, A, R, P, Call, OnPending, OnCancelWoken, OnCancelSleeping>
+Drop for WaitFuture<'a, M, A, R, P, Call, OnPending, OnCancelWoken, OnCancelSleeping>
+    where
+        A: Packable<Raw=usize>,
+        Call: FnMut(A) -> WaitAction<A, R, P>,
+        OnPending: for<'b> FnMut(&'b UnsafeCell<M>, &'b mut P),
+        OnCancelWoken: FnOnce(M, P),
+        OnCancelSleeping: FnOnce(M, P),
+{
     fn drop(&mut self) {
         unsafe {
             match mem::replace(&mut self.step, WaitFutureStep::Done) {
-                WaitFutureStep::Enter => {
-                    test_println!("Dropping on enter");
-                }
+                WaitFutureStep::Enter => {}
                 WaitFutureStep::Waiting => {
                     loop {
                         let mut owner = self.waiter.as_ptr().futex().load(Relaxed);
@@ -354,10 +463,13 @@ impl<'a, W: Wait> Drop for WaitFuture<'a, W> {
                     }
                     match self.waiter.as_mut_ptr().waker_mut().load_mut() {
                         WaiterWaker::None => panic!(),
-                        WaiterWaker::Waiting { waker } => mem::drop(waker.into_waker()),
+                        WaiterWaker::Waiting { waker } => {
+                            mem::drop(waker.into_waker());
+                            (self.on_cancel_sleeping.take().unwrap())(self.waiter.assume_init_mut().take_message(), self.result.take().unwrap());
+                        }
                         WaiterWaker::Done => {
                             test_println!("Completed before canceling");
-                            mem::drop(self.wait.take().unwrap().exit())
+                            (self.on_cancel_woken.take().unwrap())(self.waiter.assume_init_mut().take_message(), self.result.take().unwrap());
                         }
                     }
                 }
@@ -368,8 +480,16 @@ impl<'a, W: Wait> Drop for WaitFuture<'a, W> {
     }
 }
 
-unsafe impl<'a, W: Wait> Send for WaitFuture<'a, W> {}
+unsafe impl<'a, M, A, R, P, Call, OnPending, OnCancelWoken, OnCancelSleeping>
+Send for WaitFuture<'a, M, A, R, P, Call, OnPending, OnCancelWoken, OnCancelSleeping>
+    where
+        A: Packable<Raw=usize>,
+        Call: FnMut(A) -> WaitAction<A, R, P>,
+        OnPending: for<'b> FnMut(&'b UnsafeCell<M>, &'b mut P),
+        OnCancelWoken: FnOnce(M, P),
+        OnCancelSleeping: FnOnce(M, P),
+{}
 
-unsafe impl Send for Futex {}
+unsafe impl<M> Send for Futex<M> {}
 
-unsafe impl Sync for Futex {}
+unsafe impl<M> Sync for Futex<M> {}

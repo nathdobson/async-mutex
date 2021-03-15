@@ -10,7 +10,7 @@ use std::pin::Pin;
 use crate::futex::state::{CopyWaker, WaiterWaker};
 use crate::sync::atomic::Ordering::Acquire;
 use crate::sync::atomic::Ordering::AcqRel;
-use crate::futex::{Futex, WaitFuture, WaitImpl, EnterResult, RequeueResult};
+use crate::futex::{Futex, WaitFuture, RequeueResult, Flow, WaitAction};
 use crate::fair_mutex::MutexGuard;
 use crate::fair_mutex::Mutex;
 use std::marker::PhantomData;
@@ -18,7 +18,7 @@ use crate::sync::atomic::Ordering::Relaxed;
 use crate::test_println;
 
 pub struct Condvar {
-    futex: Futex,
+    futex: Futex<()>,
 }
 
 impl Condvar {
@@ -29,17 +29,17 @@ impl Condvar {
         unsafe {
             let mutex = guard.mutex;
             mem::forget(guard);
-            self.futex.wait(WaitImpl {
-                enter: |old| {
-                    assert!(old == 0 || old == mutex as *const Mutex<T> as usize);
-                    EnterResult { userdata: Some(mutex as *const Mutex<T> as usize), pending: true }
+            let _: (Flow<!, _>, _) = self.futex.wait(
+                (),
+                |old| {
+                    assert!(old == null() || old == mutex as *const Mutex<T>);
+                    WaitAction { update: Some(mutex as *const Mutex<T>), flow: Flow::Pending(()) }
                 },
-                post_enter: Some(|| {
-                    mutex.unlock();
-                }),
-                exit: || MutexGuard { mutex },
-                phantom: PhantomData::<usize>,
-            }).await
+                |_, _| mutex.unlock(),
+                |_, _| mutex.unlock(),
+                |_, _| todo!(),
+            ).await;
+            MutexGuard { mutex }
         }
     }
     pub fn notify<T>(&self, guard: &mut MutexGuard<T>, count: usize) {

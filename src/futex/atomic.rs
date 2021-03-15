@@ -2,6 +2,7 @@ use crate::sync::atomic::{Ordering, AtomicUsize, AtomicBool};
 use std::marker::PhantomData;
 use std::{mem};
 use crate::futex::atomic_impl::{HasAtomic, IsAtomic};
+use std::fmt::Debug;
 
 /// An AtomicX containing a bitpacked `T` .
 #[derive(Debug)]
@@ -78,7 +79,7 @@ impl Packable for bool {
     unsafe fn decode(val: bool) -> Self { val }
 }
 
-impl Packable for usize{
+impl Packable for usize {
     type Raw = usize;
     unsafe fn encode(val: Self) -> Self::Raw { val }
     unsafe fn decode(val: Self::Raw) -> Self { val }

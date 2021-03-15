@@ -1,11 +1,11 @@
 use std::task::{RawWakerVTable, Waker};
 use crate::futex::waiter::Waiter;
-use std::{mem, ptr};
+use std::{mem, ptr, fmt};
 use crate::futex::atomic::Packable;
 use crate::futex::atomic_impl::{AtomicUsize2, usize2};
 use std::ptr::null;
 use std::mem::align_of;
-use std::fmt::Debug;
+use std::fmt::{Debug, Formatter};
 use crate::sync::atomic::AtomicUsize;
 
 #[derive(Copy, Clone, Debug, Eq, PartialOrd, PartialEq, Ord)]
@@ -18,10 +18,10 @@ pub enum WaiterWaker {
     Done,
 }
 
-#[derive(Copy, Clone, Eq, Ord, PartialOrd, PartialEq, Debug)]
-pub struct FutexAtom {
+#[derive(Eq, Ord, PartialOrd, PartialEq)]
+pub struct FutexAtom<M> {
     pub userdata: usize,
-    pub inbox: *const Waiter,
+    pub inbox: *const Waiter<M>,
 }
 
 impl CopyWaker {
@@ -29,7 +29,7 @@ impl CopyWaker {
     pub unsafe fn into_waker(self) -> Waker { mem::transmute(self) }
 }
 
-const PANIC_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(|_| panic!(), |_| panic!(), |_| panic!(), |_| panic!());
+pub const PANIC_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(|_| panic!(), |_| panic!(), |_| panic!(), |_| panic!());
 static WAITER_NONE_TAG: RawWakerVTable = PANIC_WAKER_VTABLE;
 static WAITER_DONE_TAG: RawWakerVTable = PANIC_WAKER_VTABLE;
 
@@ -55,7 +55,7 @@ impl Packable for WaiterWaker {
     }
 }
 
-impl Packable for FutexAtom {
+impl<M> Packable for FutexAtom<M> {
     // type Impl = AtomicUsize2;
     type Raw = usize2;
     unsafe fn encode(val: Self) -> usize2 {
@@ -64,6 +64,21 @@ impl Packable for FutexAtom {
 
     unsafe fn decode(val: usize2) -> Self {
         mem::transmute(val)
+    }
+}
+
+impl<M> Copy for FutexAtom<M> {}
+
+impl<M> Clone for FutexAtom<M> {
+    fn clone(&self) -> Self { *self }
+}
+
+impl<M> Debug for FutexAtom<M> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FutexAtom")
+            .field("userdata", &self.userdata)
+            .field("inbox", &self.inbox)
+            .finish()
     }
 }
 
@@ -83,6 +98,7 @@ mod test {
 
     static DATA_VALUE: () = ();
     static VTABLE_VALUE: RawWakerVTable = PANIC_WAKER_VTABLE;
+
     fn copy_waker() -> CopyWaker {
         CopyWaker(&DATA_VALUE, &VTABLE_VALUE)
     }
@@ -96,7 +112,7 @@ mod test {
 
     #[test]
     fn test_futex_atom() {
-        let waiter = MaybeUninit::uninit();
+        let waiter: MaybeUninit<Waiter<()>> = MaybeUninit::uninit();
         verify(FutexAtom { userdata: 123, inbox: waiter.as_ptr() });
     }
 }
