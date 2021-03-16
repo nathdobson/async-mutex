@@ -28,7 +28,7 @@ use crate::futex::waiter::Waiter;
 
 #[derive(Debug)]
 pub struct Mutex<T> {
-    pub(crate) futex: Futex<()>,
+    pub(crate) futex: Futex,
     inner: UnsafeCell<T>,
 }
 
@@ -39,7 +39,7 @@ pub struct MutexGuard<'a, T> {
 
 impl<T> Mutex<T> {
     pub fn new(inner: T) -> Self {
-        Mutex { futex: Futex::new(0), inner: UnsafeCell::new(inner) }
+        Mutex { futex: Futex::new(0, 1), inner: UnsafeCell::new(inner) }
     }
 
     pub fn get_mut(&mut self) -> &mut T {
@@ -50,7 +50,8 @@ impl<T> Mutex<T> {
         unsafe {
             let mut flipped = false;
             if let Flow::Ready(_) = self.futex.wait(
-                (),
+                0,
+                0,
                 |locked| {
                     if locked == 0 {
                         WaitAction { update: Some(1), flow: Flow::Ready(()) }
@@ -58,10 +59,10 @@ impl<T> Mutex<T> {
                         WaitAction { update: None, flow: Flow::Pending(()) }
                     }
                 },
-                |_, _| (),
-                |_, _| self.unlock(),
-                |_, _| (),
-            ).await.0 {
+                |_| (),
+                |_| self.unlock(),
+                |_| (),
+            ).await {
                 test_println!("Flipped on");
             }
             MutexGuard { mutex: self }
@@ -72,13 +73,12 @@ impl<T> Mutex<T> {
         test_println!("Unlocking");
         let state = self.futex.lock_state();
         let mut flipped = false;
-        let waiter = state.with_mut(|state| {
-            self.futex.update_flip(&mut *state, |atom, queued| {
-                flipped = !queued;
-                (!queued).then_some(0)
-            });
-            self.futex.pop(&mut *state)
+        self.futex.update_flip(&*state, |atom, queued| {
+            flipped = !queued;
+            (!queued).then_some(0)
         });
+        let waiter = self.futex.pop(&*state, 0);
+
         assert!(flipped != waiter.is_some());
         if let Some(waiter) = waiter {
             test_println!("Waiter is done");
@@ -112,7 +112,7 @@ impl<'a, T> DerefMut for MutexGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target { unsafe { &mut *self.mutex.inner.with_mut(|x| x) } }
 }
 
-impl<T:Default> Default for Mutex<T>{
+impl<T: Default> Default for Mutex<T> {
     fn default() -> Self {
         Mutex::new(T::default())
     }

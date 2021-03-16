@@ -18,6 +18,7 @@ use crate::mpsc::Receiver;
 use crate::mpsc::Sender;
 use std::mem::MaybeUninit;
 use crate::cell::UnsafeCell;
+use crate::rwlock::RwLock;
 
 #[derive(Copy, Clone)]
 pub struct Test<Start, Run, Stop>
@@ -231,5 +232,31 @@ pub fn channel_test(senders: &'static [usize], cap: usize) -> impl IsTest {
             }
         },
         stop: move |mut pair, _| {},
+    }
+}
+
+
+pub fn rwlock_test(writers: usize, readers: usize) -> impl IsTest {
+    Test {
+        tasks: readers + writers,
+        start: move || -> RwLock<usize>{
+            test_println!("Creating rwlock");
+            RwLock::new(0)
+        },
+        run: move |rwlock: Arc<RwLock<usize>>, task| async move {
+            if task < writers {
+                *rwlock.write().await ^= task;
+            } else {
+                let value = *rwlock.read().await;
+                test_println!("{:?}",value );
+            }
+        },
+        stop: move |mut mutex, _| {
+            let mut expected = 0;
+            for task in 0..writers {
+                expected ^= task;
+            }
+            assert_eq!(expected, *mutex.get_mut())
+        },
     }
 }

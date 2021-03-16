@@ -159,5 +159,6 @@ pub fn yield_now() -> impl Future {
 macro_rules! test_println {
     ($($xs:tt)*) => {
         //println!($($xs)*)
+        ()
     }
 }

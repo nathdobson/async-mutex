@@ -1,4 +1,4 @@
-use crate::tests::test::{IsTest, simple_test, cancel_test, condvar_test, condvar_test_a, channel_test};
+use crate::tests::test::{IsTest, simple_test, cancel_test, condvar_test, condvar_test_a, channel_test, rwlock_test};
 use crate::sync::Arc;
 use crate::thread;
 use crate::loom::model::Builder;
@@ -83,8 +83,6 @@ fn test_cancel_loom_1_1_inf() {
     builder.preemption_bound = None;
     run_loom(builder, cancel_test(1, 1));
 }
-
-
 
 
 #[test]
@@ -186,6 +184,7 @@ fn test_channel_a() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "test_seconds"), ignore)]
 fn test_channel_b_3() {
     let mut builder = Builder::new();
     builder.preemption_bound = Some(4);
@@ -224,3 +223,55 @@ fn test_channel_d_4() {
     builder.preemption_bound = Some(4);
     run_loom(builder, channel_test(&[2, 1], 2));
 }
+
+#[test]
+fn test_rwlock_1_1_inf() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = None;
+    run_loom(builder, rwlock_test(1, 1));
+}
+
+#[test]
+fn test_rwlock_2_0_inf() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = None;
+    run_loom(builder, rwlock_test(2, 0));
+}
+
+#[test]
+fn test_rwlock_0_2_inf() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = None;
+    run_loom(builder, rwlock_test(0, 2));
+}
+
+#[test]
+fn test_rwlock_1_2_3() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = Some(3);
+    run_loom(builder, rwlock_test(1, 2));
+}
+
+#[test]
+#[cfg_attr(not(feature = "test_seconds"), ignore)]
+fn test_rwlock_1_2_4() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = Some(4);
+    run_loom(builder, rwlock_test(1, 2));
+}
+
+#[test]
+fn test_rwlock_2_1_3() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = Some(3);
+    run_loom(builder, rwlock_test(2, 1));
+}
+
+#[test]
+#[cfg_attr(not(feature = "test_seconds"), ignore)]
+fn test_rwlock_2_1_4() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = Some(4);
+    run_loom(builder, rwlock_test(2, 1));
+}
+

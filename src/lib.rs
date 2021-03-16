@@ -44,7 +44,7 @@ pub mod futex;
 pub mod spin_lock;
 pub mod condvar;
 pub mod mpsc;
-//pub mod rwlock;
+pub mod rwlock;
 //pub mod mpsc;
 
 pub use fair_mutex::Mutex;

@@ -14,7 +14,7 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable};
 use std::task::Waker;
 
 use crate::futex::atomic::{Atomic, Packable};
-use crate::futex::atomic_impl::{AtomicUsize2, usize2};
+use crate::futex::atomic_impl::{AtomicUsize2, usize2, usize_half};
 use crate::cell::UnsafeCell;
 use crate::futex::{Futex, WaitFuture, WaitAction, Flow};
 use crate::future::Future;
@@ -28,7 +28,7 @@ use crate::futex::waiter::Waiter;
 
 #[derive(Debug)]
 pub struct RwLock<T> {
-    pub(crate) futex: Futex<()>,
+    pub(crate) futex: Futex,
     inner: UnsafeCell<T>,
 }
 
@@ -43,14 +43,22 @@ pub struct WriteGuard<'a, T> {
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub struct State {
+pub struct Atom {
+    // Number of active readers (excluding queued)
     readers: usize,
-    writing: bool,
+    // Number of writers (including queued)
+    writers: usize,
 }
+
+const READ_QUEUE: usize = 0;
+const WRITE_QUEUE: usize = 1;
 
 impl<T> RwLock<T> {
     pub fn new(inner: T) -> Self {
-        RwLock { futex: Futex::new(0), inner: UnsafeCell::new(inner) }
+        RwLock {
+            futex: Futex::new(Atom { readers: 0, writers: 0 }, 2),
+            inner: UnsafeCell::new(inner),
+        }
     }
 
     pub fn get_mut(&mut self) -> &mut T {
@@ -59,70 +67,125 @@ impl<T> RwLock<T> {
 
     pub async fn read<'a>(&'a self) -> ReadGuard<'a, T> {
         unsafe {
+            test_println!("Read locking");
             self.futex.wait(
-                (),
-                |state: State| {
-                    if state.writing {
+                0,
+                READ_QUEUE,
+                |atom: Atom| {
+                    if atom.writers > 0 {
                         WaitAction { update: None, flow: Flow::Pending(()) }
                     } else {
                         WaitAction {
-                            update: Some(State { readers: state.readers + 1, writing: false }),
+                            update: Some(Atom { readers: atom.readers + 1, ..atom }),
                             flow: Flow::Ready(()),
                         }
                     }
                 },
-                |_, _| (),
-                |_, _| self.read_unlock(),
-                |_, _| (),
+                |_| test_println!("Read waiting"),
+                |_| self.read_unlock(),
+                |_| (),
             ).await;
+            test_println!("Read locked");
             ReadGuard { mutex: self }
         }
     }
 
+    pub async fn write<'a>(&'a self) -> WriteGuard<'a, T> {
+        unsafe {
+            test_println!("Write locking");
+            self.futex.wait(
+                0,
+                WRITE_QUEUE,
+                |atom: Atom| {
+                    WaitAction {
+                        update: Some(Atom { writers: atom.writers + 1, ..atom }),
+                        flow: if atom == (Atom { readers: 0, writers: 0 }) {
+                            Flow::Ready(())
+                        } else {
+                            Flow::Pending(())
+                        },
+                    }
+                },
+                |_| test_println!("Write waiting"),
+                |_| self.write_unlock(),
+                |_| self.write_abort(),
+            ).await;
+            test_println!("Write locked");
+            WriteGuard { mutex: self }
+        }
+    }
+
+    pub(crate) unsafe fn write_abort(&self) {
+        todo!()
+    }
+
     pub(crate) unsafe fn read_unlock(&self) {
-        if self.futex.update(|mut state: State| {
-            if state == (State { readers: 1, writing: true }) {
+        if self.futex.update(|mut atom: Atom| {
+            if atom.readers == 1 && atom.writers > 0 {
                 None
             } else {
-                Some(State { readers: state.readers - 1, writing: state.writing })
+                Some(Atom { readers: atom.readers - 1, ..atom })
             }
         }).is_ok() {
             return;
         }
         let state = self.futex.lock_state();
-        let waiter = state.with_mut(|state| {
-            self.futex.update_flip(&mut *state, |atom, queued| {
-
-            });
-            self.futex.pop(&mut *state)
+        self.futex.update_flip(&*state, |atom: Atom, queued| {
+            Some(Atom { readers: 0, ..atom })
         });
-        assert!(flipped != waiter.is_some());
-        if let Some(waiter) = waiter {
-            test_println!("Waiter is done");
-            waiter.done();
+        if let Some(writer) = self.futex.pop(&*state, WRITE_QUEUE) {
+            writer.done();
         } else {
-            test_println!("Flipped off");
+            assert!(self.futex.pop(&*state, READ_QUEUE).is_none());
         }
     }
 
     pub(crate) unsafe fn write_unlock(&self) {
-
+        let state = self.futex.lock_state();
+        let mut waking = false;
+        self.futex.update_flip(&*state, |atom: Atom, queued| {
+            assert_eq!(atom.readers, 0);
+            if atom.writers == 1 {
+                if queued {
+                    // Downgrade to a read lock so it's safe to wake other readers.
+                    waking = true;
+                    Some(Atom { writers: 0, readers: 1 })
+                } else {
+                    waking = false;
+                    Some(Atom { writers: 0, readers: 0 })
+                }
+            } else {
+                waking = true;
+                Some(Atom { writers: atom.writers - 1, readers: 0 })
+            }
+        });
+        if waking {
+            if let Some(writer) = self.futex.pop(&*state, WRITE_QUEUE) {
+                writer.done();
+                return;
+            }
+            let readers = self.futex.pop_many(&*state, usize::MAX, READ_QUEUE);
+            let count = readers.count();
+            self.futex.update(|atom: Atom| {
+                Some(Atom { readers: atom.readers + count - 1, ..atom })
+            }).ok();
+            for reader in readers {
+                reader.done();
+            }
+        }
     }
 }
 
-const WRITING_MASK: usize = 1 << (usize::BITS - 1);
-const READERS_MASK: usize = !WRITING_MASK;
-
-impl Packable for State {
+impl Packable for Atom {
     type Raw = usize;
 
     unsafe fn encode(val: Self) -> Self::Raw {
-        assert!(val.readers < usize::MAX >> 1);
-        (if val.writing { WRITING_MASK } else { 0 }) | val.readers
+        mem::transmute((val.readers as usize_half, val.writers as usize_half))
     }
 
     unsafe fn decode(val: Self::Raw) -> Self {
-        State { readers: val & READERS_MASK, writing: val & WRITING_MASK == WRITING_MASK }
+        let (readers, writers): (usize_half, usize_half) = mem::transmute(val);
+        Self { readers: readers as usize, writers: writers as usize }
     }
 }
 

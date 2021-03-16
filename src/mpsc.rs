@@ -46,10 +46,12 @@ enum RecvState {
 #[derive(Debug)]
 struct Inner<T> {
     buckets: Vec<Bucket<T>>,
-    send_queue: Futex<Option<T>>,
+    send_queue: Futex,
     recv_state: Atomic<RecvState>,
     recv_head: UnsafeCell<usize>,
 }
+
+struct Message<T> (UnsafeCell<Option<T>>);
 
 pub fn channel<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     let inner = Arc::new(Inner::new(cap));
@@ -69,7 +71,7 @@ impl<T> Inner<T> {
                 .collect();
         Inner {
             buckets,
-            send_queue: Futex::new(SendState { write_head: 0, size: 0 }),
+            send_queue: Futex::new(SendState { write_head: 0, size: 0 }, 1),
             recv_state: Atomic::new(RecvState::Dirty),
             recv_head: UnsafeCell::new(0),
         }
@@ -77,8 +79,11 @@ impl<T> Inner<T> {
 
     pub async unsafe fn send(&self, msg: T) -> Result<(), SendError<T>> {
         let cap = self.buckets.len();
-        let (selected, msg) = self.send_queue.wait(
-            Some(msg),
+        let mut msg: Message<T> = Message(UnsafeCell::new(Some(msg)));
+        let msg_ptr = &msg as *const Message<T> as usize;
+        let selected = self.send_queue.wait(
+            msg_ptr,
+            0,
             |mut state: SendState| {
                 if state.size < cap {
                     let selected = state.write_head;
@@ -89,12 +94,12 @@ impl<T> Inner<T> {
                     WaitAction { update: None, flow: Flow::Pending(()) }
                 }
             },
-            |_, _| (),
-            |msg, _| assert!(msg.is_none()),
-            |msg, _| assert!(msg.is_some()),
+            |_| (),
+            |_| assert!(msg.is_none()),
+            |_| (),
         ).await;
         if let Flow::Ready(selected) = selected {
-            let msg = msg.unwrap();
+            let msg = msg.take();
             self.buckets[selected].data.with_mut(|data|
                 (*data).write(msg)
             );
@@ -130,22 +135,23 @@ impl<T> Inner<T> {
             test_println!("Unfilled {:?}", head);
             let result = (*bucket).data.with_mut(|x| (*x).assume_init_read());
             self.recv_head.with_mut(|x| *x = (head + 1) % self.buckets.len());
-            let lock = self.send_queue.lock_state();
-            let waiter = lock.with_mut(|state| {
-                self.send_queue.update_flip(&mut *state, |atom: SendState, queued| {
-                    if queued {
-                        assert_eq!(atom.size, self.buckets.len());
-                        Some(SendState { write_head: (atom.write_head + 1) % self.buckets.len(), size: atom.size })
-                    } else {
-                        Some(SendState { write_head: atom.write_head, size: atom.size - 1 })
-                    }
-                });
-                self.send_queue.pop(&mut *state)
+            let state = self.send_queue.lock_state();
+            self.send_queue.update_flip(&*state, |atom: SendState, queued| {
+                if queued {
+                    assert_eq!(atom.size, self.buckets.len());
+                    Some(SendState { write_head: (atom.write_head + 1) % self.buckets.len(), size: atom.size })
+                } else {
+                    Some(SendState { write_head: atom.write_head, size: atom.size - 1 })
+                }
             });
+            let waiter = self.send_queue.pop(&*state, 0);
             if let Some(waiter) = waiter {
                 (*bucket).filled.store_mut(true);
                 test_println!("Backfilled {:?}",head);
-                (*bucket).data.with_mut(|x| (*x).write(waiter.message().with_mut(|x| (*x).take().unwrap())));
+                (*bucket).data.with_mut(|bucket| {
+                    let message = waiter.message() as *const Message<T>;
+                    (*bucket).write((*message).take())
+                });
                 waiter.done();
             }
             Poll::Ready(result)
@@ -205,7 +211,22 @@ impl<T> Drop for Inner<T> {
     }
 }
 
+impl<T> Message<T> {
+    unsafe fn new(x: T) -> Self {
+        Message(UnsafeCell::new(Some(x)))
+    }
+    unsafe fn is_none(&self) -> bool {
+        self.0.with_mut(|x| (*x).is_none())
+    }
+    unsafe fn take(&self) -> T {
+        self.0.with_mut(|x| (*x).take().unwrap())
+    }
+}
 
 unsafe impl<T: Send> Send for Inner<T> {}
 
 unsafe impl<T: Send> Sync for Inner<T> {}
+
+unsafe impl<T: Send> Send for Message<T> {}
+
+unsafe impl<T: Send> Sync for Message<T> {}

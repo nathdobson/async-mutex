@@ -19,9 +19,9 @@ pub enum WaiterWaker {
 }
 
 #[derive(Eq, Ord, PartialOrd, PartialEq)]
-pub struct FutexAtom<M> {
+pub struct FutexAtom {
     pub userdata: usize,
-    pub inbox: *const Waiter<M>,
+    pub inbox: *const Waiter,
 }
 
 impl CopyWaker {
@@ -55,7 +55,7 @@ impl Packable for WaiterWaker {
     }
 }
 
-impl<M> Packable for FutexAtom<M> {
+impl Packable for FutexAtom {
     // type Impl = AtomicUsize2;
     type Raw = usize2;
     unsafe fn encode(val: Self) -> usize2 {
@@ -67,13 +67,13 @@ impl<M> Packable for FutexAtom<M> {
     }
 }
 
-impl<M> Copy for FutexAtom<M> {}
+impl Copy for FutexAtom {}
 
-impl<M> Clone for FutexAtom<M> {
+impl Clone for FutexAtom {
     fn clone(&self) -> Self { *self }
 }
 
-impl<M> Debug for FutexAtom<M> {
+impl Debug for FutexAtom {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("FutexAtom")
             .field("userdata", &self.userdata)
@@ -112,7 +112,7 @@ mod test {
 
     #[test]
     fn test_futex_atom() {
-        let waiter: MaybeUninit<Waiter<()>> = MaybeUninit::uninit();
+        let waiter: MaybeUninit<Waiter> = MaybeUninit::uninit();
         verify(FutexAtom { userdata: 123, inbox: waiter.as_ptr() });
     }
 }

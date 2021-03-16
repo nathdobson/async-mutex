@@ -18,26 +18,27 @@ use crate::sync::atomic::Ordering::Relaxed;
 use crate::test_println;
 
 pub struct Condvar {
-    futex: Futex<()>,
+    futex: Futex,
 }
 
 impl Condvar {
     pub fn new() -> Self {
-        Condvar { futex: Futex::new(0) }
+        Condvar { futex: Futex::new(0, 1) }
     }
     pub async fn wait<'g, T>(&self, guard: MutexGuard<'g, T>) -> MutexGuard<'g, T> {
         unsafe {
             let mutex = guard.mutex;
             mem::forget(guard);
-            let _: (Flow<!, _>, _) = self.futex.wait(
-                (),
+            let _: Flow<!, _> = self.futex.wait(
+                0,
+                0,
                 |old| {
                     assert!(old == null() || old == mutex as *const Mutex<T>);
                     WaitAction { update: Some(mutex as *const Mutex<T>), flow: Flow::Pending(()) }
                 },
-                |_, _| mutex.unlock(),
-                |_, _| mutex.unlock(),
-                |_, _| todo!(),
+                |_| mutex.unlock(),
+                |_| mutex.unlock(),
+                |_| todo!(),
             ).await;
             MutexGuard { mutex }
         }
@@ -52,11 +53,9 @@ impl Condvar {
             if guard.mutex as *const Mutex<T> != mutex {
                 panic!("Different mutex");
             }
-            let lock = self.futex.lock_state();
-            let waiters = lock.with_mut(|state| {
-                self.futex.update_flip(&mut *state, |_: usize, _| None);
-                self.futex.pop_many(&mut *state, count)
-            });
+            let state = self.futex.lock_state();
+            self.futex.update_flip(&*state, |_: usize, _| None);
+            let waiters = self.futex.pop_many(&*state, count, 0);
             test_println!("Requeueing {:?}", waiters);
             guard.mutex.futex.requeue(&self.futex, waiters);
         }

@@ -1,6 +1,6 @@
 use crate::{thread, Mutex};
 use crate::sync::Arc;
-use crate::tests::test::{IsTest, simple_test, cancel_test, condvar_test, channel_test};
+use crate::tests::test::{IsTest, simple_test, cancel_test, condvar_test, channel_test, rwlock_test};
 use futures::executor::{LocalPool, ThreadPool};
 use crate::future::{block_on, Future, ready, poll_fn};
 use futures::task::{Spawn, SpawnExt};
@@ -328,4 +328,14 @@ fn test_channel_locally() {
 #[test]
 fn test_channel_threaded() {
     run_threaded(channel_test(&[10000; 10], 100))
+}
+
+#[test]
+fn test_rwlock_locally() {
+    run_locally(rwlock_test(1, 1))
+}
+
+#[test]
+fn test_rwlock_threaded() {
+    run_threaded(rwlock_test(100000,0))
 }
