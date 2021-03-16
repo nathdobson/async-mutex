@@ -1,11 +1,11 @@
 use crate::sync::atomic::{Ordering, AtomicUsize, AtomicBool};
 use std::marker::PhantomData;
-use std::{mem};
+use std::{mem, fmt};
 use crate::futex::atomic_impl::{HasAtomic, IsAtomic};
-use std::fmt::Debug;
+use std::fmt::{Debug, Formatter};
+use crate::sync::atomic::Ordering::Relaxed;
 
 /// An AtomicX containing a bitpacked `T` .
-#[derive(Debug)]
 pub struct Atomic<T>(<T::Raw as HasAtomic>::Impl, PhantomData<T>) where T: Packable, T::Raw: HasAtomic;
 
 /// Specify how to bitpack a value.
@@ -56,6 +56,12 @@ impl<T> Atomic<T> where T: Packable, T::Raw: HasAtomic {
                 }
             }
         }
+    }
+}
+
+impl<T> Debug for Atomic<T> where T: Packable + Debug, T::Raw: HasAtomic {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.load(Relaxed))
     }
 }
 

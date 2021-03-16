@@ -6,6 +6,8 @@ pub mod test;
 #[cfg(not(loom))]
 pub mod bench;
 pub mod test_waker;
+#[cfg(not(loom))]
+pub mod threadpool;
 
 use futures::executor::{LocalPool, block_on};
 use crate::{Mutex, MutexGuard, thread, util};

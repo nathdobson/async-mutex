@@ -129,21 +129,21 @@ impl<T> RwLock<T> {
         }).is_ok() {
             return;
         }
-        let state = self.futex.lock_state();
-        self.futex.update_flip(&*state, |atom: Atom, queued| {
+        let lock = self.futex.lock();
+        lock.update_flip(|atom: Atom, queued| {
             Some(Atom { readers: 0, ..atom })
         });
-        if let Some(writer) = self.futex.pop(&*state, WRITE_QUEUE) {
+        if let Some(writer) = lock.pop(WRITE_QUEUE) {
             writer.done();
         } else {
-            assert!(self.futex.pop(&*state, READ_QUEUE).is_none());
+            assert!(lock.pop(READ_QUEUE).is_none());
         }
     }
 
     pub(crate) unsafe fn write_unlock(&self) {
-        let state = self.futex.lock_state();
+        let lock = self.futex.lock();
         let mut waking = false;
-        self.futex.update_flip(&*state, |atom: Atom, queued| {
+        lock.update_flip(|atom: Atom, queued| {
             assert_eq!(atom.readers, 0);
             if atom.writers == 1 {
                 if queued {
@@ -160,11 +160,11 @@ impl<T> RwLock<T> {
             }
         });
         if waking {
-            if let Some(writer) = self.futex.pop(&*state, WRITE_QUEUE) {
+            if let Some(writer) = lock.pop(WRITE_QUEUE) {
                 writer.done();
                 return;
             }
-            let readers = self.futex.pop_many(&*state, usize::MAX, READ_QUEUE);
+            let readers = lock.pop_many(usize::MAX, READ_QUEUE);
             let count = readers.count();
             self.futex.update(|atom: Atom| {
                 Some(Atom { readers: atom.readers + count - 1, ..atom })

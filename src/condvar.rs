@@ -53,11 +53,11 @@ impl Condvar {
             if guard.mutex as *const Mutex<T> != mutex {
                 panic!("Different mutex");
             }
-            let state = self.futex.lock_state();
-            self.futex.update_flip(&*state, |_: usize, _| None);
-            let waiters = self.futex.pop_many(&*state, count, 0);
+            let lock = self.futex.lock();
+            lock.update_flip(|_: usize, _| None);
+            let waiters = lock.pop_many(count, 0);
             test_println!("Requeueing {:?}", waiters);
-            guard.mutex.futex.requeue(&self.futex, waiters);
+            lock.requeue(&guard.mutex.futex, waiters);
         }
     }
     pub fn notify_all<T>(&self, guard: &mut MutexGuard<T>) {

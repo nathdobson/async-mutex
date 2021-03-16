@@ -135,8 +135,8 @@ impl<T> Inner<T> {
             test_println!("Unfilled {:?}", head);
             let result = (*bucket).data.with_mut(|x| (*x).assume_init_read());
             self.recv_head.with_mut(|x| *x = (head + 1) % self.buckets.len());
-            let state = self.send_queue.lock_state();
-            self.send_queue.update_flip(&*state, |atom: SendState, queued| {
+            let lock = self.send_queue.lock();
+            lock.update_flip(|atom: SendState, queued| {
                 if queued {
                     assert_eq!(atom.size, self.buckets.len());
                     Some(SendState { write_head: (atom.write_head + 1) % self.buckets.len(), size: atom.size })
@@ -144,7 +144,7 @@ impl<T> Inner<T> {
                     Some(SendState { write_head: atom.write_head, size: atom.size - 1 })
                 }
             });
-            let waiter = self.send_queue.pop(&*state, 0);
+            let waiter = lock.pop(0);
             if let Some(waiter) = waiter {
                 (*bucket).filled.store_mut(true);
                 test_println!("Backfilled {:?}",head);

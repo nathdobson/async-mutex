@@ -76,7 +76,7 @@ pub fn simple_test(tasks: usize) -> impl IsTest {
             test_println!("Creating mutex");
             Mutex::new(0)
         },
-        run: move |mutex, task| async move {
+        run: move |mutex: Arc<Mutex<usize>>, task| async move {
             test_println!("Starting {}", task);
             let mut lock = mutex.lock().await;
             test_println!("Running  {}", task);

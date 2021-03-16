@@ -3,7 +3,7 @@ use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::lazy::SyncOnceCell;
 use std::marker::PhantomData;
-use std::mem;
+use std::{mem, thread};
 use std::mem::{align_of, MaybeUninit, size_of};
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
@@ -25,6 +25,8 @@ use crate::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use crate::test_println;
 use crate::util::{AsyncFnOnce, Bind, FnOnceExt};
 use crate::futex::waiter::Waiter;
+use core::time::Duration;
+use crate::sync::atomic::Ordering::SeqCst;
 
 #[derive(Debug)]
 pub struct Mutex<T> {
@@ -48,8 +50,7 @@ impl<T> Mutex<T> {
 
     pub async fn lock<'a>(&'a self) -> MutexGuard<'a, T> {
         unsafe {
-            let mut flipped = false;
-            if let Flow::Ready(_) = self.futex.wait(
+            self.futex.wait(
                 0,
                 0,
                 |locked| {
@@ -62,30 +63,24 @@ impl<T> Mutex<T> {
                 |_| (),
                 |_| self.unlock(),
                 |_| (),
-            ).await {
-                test_println!("Flipped on");
-            }
+            ).await;
             MutexGuard { mutex: self }
         }
     }
 
     pub(crate) unsafe fn unlock(&self) {
-        test_println!("Unlocking");
-        let state = self.futex.lock_state();
-        let mut flipped = false;
-        self.futex.update_flip(&*state, |atom, queued| {
-            flipped = !queued;
+        let lock = self.futex.lock();
+        let mut is_queued = false;
+        lock.update_flip(|atom, queued| {
+            is_queued = queued;
             (!queued).then_some(0)
         });
-        let waiter = self.futex.pop(&*state, 0);
-
-        assert!(flipped != waiter.is_some());
-        if let Some(waiter) = waiter {
-            test_println!("Waiter is done");
-            waiter.done();
-        } else {
-            test_println!("Flipped off");
+        if is_queued {
+            if let Some(waiter) = lock.pop(0) {
+                waiter.done();
+            }
         }
+        mem::drop(lock);
     }
 }
 

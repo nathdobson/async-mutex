@@ -18,6 +18,8 @@ use crate::condvar::Condvar;
 use crate::mpsc::channel;
 use Poll::Ready;
 use Poll::Pending;
+use crate::test_println;
+use crate::tests::threadpool;
 
 fn run_with_spawner<T: IsTest>(test: T, spawner: &dyn Spawn) -> impl Future {
     let mut state = Arc::new(test.start());
@@ -46,8 +48,9 @@ fn run_locally<T: IsTest>(test: T) {
 }
 
 fn run_threaded<T: IsTest>(test: T) {
-    let mut pool = ThreadPool::new().unwrap();
+    let mut pool = threadpool::ThreadPool::new();
     let fut = run_with_spawner(test, &pool);
+    pool.run(100);
     block_on(fut);
 }
 
@@ -58,7 +61,7 @@ fn test_simple_local() {
 
 #[test]
 fn test_simple_threaded() {
-    run_threaded(simple_test(10000));
+    run_threaded(simple_test(100000));
 }
 
 //
@@ -154,7 +157,11 @@ fn test_cancel1() {
         assert!(fut2.as_mut().poll(&mut cx2).is_pending());
         assert_eq!((1, 0), test_waker1.load());
         assert_eq!((2, 0), test_waker2.load());
+        unsafe { test_println!("{:?}", mutex.futex.unsafe_debug()); }
     }
+    unsafe { test_println!("{:?}", mutex.futex.unsafe_debug()); }
+    mem::drop(guard);
+
     assert_eq!((1, 0), test_waker1.load());
     assert_eq!((1, 0), test_waker2.load());
 }
@@ -337,5 +344,5 @@ fn test_rwlock_locally() {
 
 #[test]
 fn test_rwlock_threaded() {
-    run_threaded(rwlock_test(100000,0))
+    run_threaded(rwlock_test(100000, 0))
 }
