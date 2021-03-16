@@ -111,3 +111,9 @@ impl<'a, T> Deref for MutexGuard<'a, T> {
 impl<'a, T> DerefMut for MutexGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target { unsafe { &mut *self.mutex.inner.with_mut(|x| x) } }
 }
+
+impl<T:Default> Default for Mutex<T>{
+    fn default() -> Self {
+        Mutex::new(T::default())
+    }
+}

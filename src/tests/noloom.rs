@@ -266,8 +266,8 @@ fn test_channel_send_recv_1() {
     let (sender, mut receiver) = channel(1);
     let mut fut1 = pool.spawn(sender.send(1));
     let mut fut2 = pool.spawn(receiver.recv());
-    assert_eq!((Ready(()), vec![]), pool.step(&mut fut1));
-    assert_eq!((Ready(1), vec![]), pool.step(&mut fut2));
+    assert_eq!((Ready(Ok(())), vec![]), pool.step(&mut fut1));
+    assert_eq!((Ready(Ok(1)), vec![]), pool.step(&mut fut2));
 }
 
 #[test]
@@ -277,8 +277,8 @@ fn test_channel_recv_send_1() {
     let mut fut0 = pool.spawn(receiver.recv());
     let mut fut1 = pool.spawn(sender.send(1));
     assert_eq!((Pending, vec![]), pool.step(&mut fut0));
-    assert_eq!((Ready(()), vec![0]), pool.step(&mut fut1));
-    assert_eq!((Ready(1), vec![]), pool.step(&mut fut0));
+    assert_eq!((Ready(Ok(())), vec![0]), pool.step(&mut fut1));
+    assert_eq!((Ready(Ok(1)), vec![]), pool.step(&mut fut0));
     println!("{:?}", sender);
 }
 
@@ -287,12 +287,12 @@ fn test_channel_recv_send_2() {
     let mut pool = TestPool::new();
     let (sender, mut receiver) = channel(1);
     let mut fut0 = pool.spawn(async {
-        assert_eq!(1, receiver.recv().await);
-        assert_eq!(2, receiver.recv().await);
+        assert_eq!(Ok(1), receiver.recv().await);
+        assert_eq!(Ok(2), receiver.recv().await);
     });
     let mut fut1 = pool.spawn(async {
-        sender.send(1).await;
-        sender.send(2).await;
+        sender.send(1).await.unwrap();
+        sender.send(2).await.unwrap();
     });
     assert_eq!((Pending, vec![]), pool.step(&mut fut0));
     assert_eq!((Pending, vec![0]), pool.step(&mut fut1));

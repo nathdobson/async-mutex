@@ -5,6 +5,7 @@ use crate::sync::atomic::AtomicBool;
 use crate::sync::atomic::Ordering::Release;
 use std::ops::{Deref, DerefMut};
 use crate::util::yield_now;
+use std::default::default;
 
 pub struct Mutex<T> {
     state: AtomicBool,
@@ -52,3 +53,9 @@ unsafe impl<T: Send> Sync for Mutex<T> {}
 unsafe impl<'a, T: Send> Send for MutexGuard<'a, T> {}
 
 unsafe impl<'a, T: Send + Sync> Sync for MutexGuard<'a, T> {}
+
+impl<T:Default> Default for Mutex<T>{
+    fn default() -> Self {
+        Mutex::new(default())
+    }
+}

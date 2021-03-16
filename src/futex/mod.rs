@@ -145,8 +145,32 @@ impl<M> Futex<M> {
             }
         }
     }
+
     pub unsafe fn load<A: Packable<Raw=usize>>(&self, order: Ordering) -> A {
         A::decode(self.atom.load(order).userdata)
+    }
+
+    pub unsafe fn update<A, F>(
+        &self,
+        mut update: F,
+    ) -> Result<A, A>
+        where A: Packable<Raw=usize> + Debug,
+              F: FnMut(A) -> Option<A>
+    {
+        let mut atom = self.atom.load(Acquire);
+        loop {
+            let userdata = A::decode(atom.userdata);
+            if let Some(userdata) = update(userdata) {
+                let new_atom = FutexAtom { userdata: A::encode(userdata), inbox: atom.inbox };
+                if self.atom.cmpxchg_weak(
+                    &mut atom, new_atom,
+                    AcqRel, Acquire) {
+                    return Ok(userdata);
+                }
+            } else {
+                return Err(userdata);
+            }
+        }
     }
 
     pub unsafe fn wait<A, R, P, Call, OnPending, OnCancelWoken, OnCancelSleeping>(

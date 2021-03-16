@@ -23,11 +23,16 @@
 #![feature(maybe_uninit_extra)]
 #![feature(maybe_uninit_ref)]
 #![feature(never_type)]
+#![feature(default_free_fn)]
+#![feature(int_bits_const)]
 
 #[cfg(test)]
 extern crate test;
 
 pub(crate) use crate::loom::*;
+
+#[macro_use]
+pub mod async_traits;
 
 mod loom;
 mod util;
@@ -39,7 +44,7 @@ pub mod futex;
 pub mod spin_lock;
 pub mod condvar;
 pub mod mpsc;
-pub mod traits;
+//pub mod rwlock;
 //pub mod mpsc;
 
 pub use fair_mutex::Mutex;

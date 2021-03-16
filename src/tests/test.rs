@@ -216,7 +216,7 @@ pub fn channel_test(senders: &'static [usize], cap: usize) -> impl IsTest {
                 let mut receiver = unsafe { pair.1.0.with_mut(|x| (*x).take()).unwrap() };
                 let mut received = vec![vec![]; senders.len()];
                 for i in 0..senders.iter().sum::<usize>() {
-                    let message = receiver.recv().await;
+                    let message = receiver.recv().await.unwrap();
                     test_println!("Received {:?}", message);
                     received[message.task].push(*message.seq);
                 }
@@ -225,7 +225,7 @@ pub fn channel_test(senders: &'static [usize], cap: usize) -> impl IsTest {
                 for seq in 0..senders[task] {
                     let msg = Message { task, seq: Box::new(seq) };
                     test_println!("Sending {:?}", msg);
-                    pair.0.send(msg.clone()).await;
+                    pair.0.send(msg.clone()).await.unwrap();
                     test_println!("Sent {:?}", msg);
                 }
             }

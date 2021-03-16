@@ -17,6 +17,7 @@ use crate::sync::atomic::Ordering::Relaxed;
 use std::mem;
 use std::ptr::null;
 use crate::test_println;
+use std::sync::mpsc::{SendError, RecvError};
 
 #[derive(Clone, Debug)]
 pub struct Sender<T>(Arc<Inner<T>>);
@@ -74,7 +75,7 @@ impl<T> Inner<T> {
         }
     }
 
-    pub async unsafe fn send(&self, msg: T) {
+    pub async unsafe fn send(&self, msg: T) -> Result<(), SendError<T>> {
         let cap = self.buckets.len();
         let (selected, msg) = self.send_queue.wait(
             Some(msg),
@@ -104,6 +105,7 @@ impl<T> Inner<T> {
             }
             test_println!("Filled {:?}", &self.buckets[selected] as *const Bucket<T>);
         }
+        Ok(())
     }
     pub async unsafe fn recv(&self) -> T {
         poll_fn(|cx| {
@@ -152,13 +154,13 @@ impl<T> Inner<T> {
 }
 
 impl<T> Receiver<T> {
-    pub async fn recv(&mut self) -> T {
-        unsafe { self.0.recv().await }
+    pub async fn recv(&mut self) -> Result<T, RecvError> {
+        unsafe { Ok(self.0.recv().await) }
     }
 }
 
 impl<T> Sender<T> {
-    pub async fn send(&self, msg: T) {
+    pub async fn send(&self, msg: T) -> Result<(), SendError<T>> {
         unsafe { self.0.send(msg).await }
     }
 }
