@@ -1,5 +1,5 @@
-use crate::futex::waiter::{Waiter, WaiterList};
-use crate::futex::atomic::Atomic;
+use crate::futex::{Waiter, WaiterList};
+use crate::futex::Atomic;
 use std::ptr::null;
 use std::mem::MaybeUninit;
 use std::mem;
@@ -7,15 +7,14 @@ use crate::cell::UnsafeCell;
 use crate::future::Future;
 use std::task::{Context, Poll};
 use std::pin::Pin;
-use crate::futex::state::{CopyWaker, WaiterWaker};
 use crate::sync::atomic::Ordering::Acquire;
 use crate::sync::atomic::Ordering::AcqRel;
-use crate::futex::{Futex, WaitFuture, RequeueResult, Flow, WaitAction};
+use crate::futex::{Futex, WaitFuture, Flow, WaitAction};
 use crate::fair_mutex::MutexGuard;
 use crate::fair_mutex::Mutex;
 use std::marker::PhantomData;
 use crate::sync::atomic::Ordering::Relaxed;
-use crate::test_println;
+//use crate::test_println;
 
 pub struct Condvar {
     futex: Futex,
@@ -54,7 +53,7 @@ impl Condvar {
                 panic!("Different mutex");
             }
             let lock = self.futex.lock();
-            lock.update_flip(|_: usize, _| None);
+            lock.fetch_update_enqueue(|_: usize, _| None);
             let waiters = lock.pop_many(count, 0);
             test_println!("Requeueing {:?}", waiters);
             lock.requeue(&guard.mutex.futex, waiters);

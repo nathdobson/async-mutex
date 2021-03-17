@@ -5,7 +5,7 @@ use crate::futex::state::WaiterWaker;
 use crate::futex::{Futex, FutexState};
 use crate::thread::Thread;
 use crate::sync::atomic::Ordering::AcqRel;
-use crate::test_println;
+//use crate::test_println;
 use std::fmt::{Debug, Formatter};
 use std::{fmt, mem};
 use crate::futex::atomic_impl::usize2;
@@ -13,7 +13,7 @@ use std::mem::MaybeUninit;
 use std::process::abort;
 
 #[derive(Debug)]
-pub struct FutexOwner {
+pub(in crate::futex) struct FutexOwner {
     pub first: *const Futex,
     pub second: *const Futex,
 }
@@ -43,16 +43,16 @@ impl Waiter {
             message,
         }
     }
-    pub unsafe fn waker<'a>(self: &'a *const Self) -> &'a Atomic<WaiterWaker> {
+    pub(in crate::futex) unsafe fn waker<'a>(self: &'a *const Self) -> &'a Atomic<WaiterWaker> {
         &(**self).waker
     }
-    pub unsafe fn waker_mut<'a>(self: &'a mut *mut Self) -> &'a mut Atomic<WaiterWaker> {
+    pub(in crate::futex) unsafe fn waker_mut<'a>(self: &'a mut *mut Self) -> &'a mut Atomic<WaiterWaker> {
         &mut (**self).waker
     }
-    pub unsafe fn futex<'a>(self: &'a *const Self) -> &'a Atomic<FutexOwner> {
+    pub(in crate::futex) unsafe fn futex<'a>(self: &'a *const Self) -> &'a Atomic<FutexOwner> {
         &(**self).futex
     }
-    pub unsafe fn futex_mut<'a>(self: &'a mut *mut Self) -> &'a mut Atomic<FutexOwner> {
+    pub(in crate::futex) unsafe fn futex_mut<'a>(self: &'a mut *mut Self) -> &'a mut Atomic<FutexOwner> {
         &mut (**self).futex
     }
     pub unsafe fn message(self: *const Self) -> usize {
@@ -64,7 +64,7 @@ impl Waiter {
     pub unsafe fn prev(self: *const Self) -> *const Self {
         (*self).prev.with_mut(|x| (*x))
     }
-    pub unsafe fn queue(self: *const Self) -> usize {
+    pub(in crate::futex) unsafe fn queue(self: *const Self) -> usize {
         (*self).queue.with_mut(|x| (*x))
     }
     pub unsafe fn set_next(self: *const Self, next: *const Self) {
@@ -73,10 +73,12 @@ impl Waiter {
     pub unsafe fn set_prev(self: *const Self, prev: *const Self) {
         (*self).prev.with_mut(|x| (*x) = prev);
     }
-    pub unsafe fn set_queue(self: *const Self, queue: usize) {
+    pub(in crate::futex) unsafe fn set_queue(self: *const Self, queue: usize) {
         (*self).queue.with_mut(|x| (*x) = queue);
     }
-    pub unsafe fn done(self: *const Self) {
+    /// Cause the associated call to wait to return. Note that this method "takes ownership"
+    /// of the waiter, and further calls on the waiter are undefined behavior.
+    pub unsafe fn wake(self: *const Self) {
         match self.waker().swap(WaiterWaker::Done, AcqRel) {
             WaiterWaker::Waiting { waker } => {
                 waker.into_waker().wake()
@@ -90,8 +92,8 @@ impl WaiterList {
     pub fn new() -> Self {
         WaiterList { head: null(), tail: null() }
     }
-    /// Construct a doubly linked list starting with the tail and prev pointers.
-    pub unsafe fn from_stack(tail: *const Waiter) -> Self {
+    /// Construct a doubly linked list starting with the tail and following prev pointers.
+    pub(in crate::futex) unsafe fn from_stack(tail: *const Waiter) -> Self {
         let mut head = tail;
         if head != null() {
             loop {
@@ -119,7 +121,7 @@ impl WaiterList {
         //test_println!("Append {:?}", self);
     }
 
-    pub unsafe fn append_stack(&mut self, stack: *const Waiter) {
+    pub(in crate::futex) unsafe fn append_stack(&mut self, stack: *const Waiter) {
         self.append(Self::from_stack(stack));
     }
 
@@ -146,7 +148,7 @@ impl WaiterList {
     }
 
     /// Remove from the head.
-    pub unsafe fn pop(&mut self) -> Option<*const Waiter> {
+    pub unsafe fn pop_front(&mut self) -> Option<*const Waiter> {
         //test_println!("Popping {:?}", self.head);
         if self.head == null() {
             None
@@ -164,11 +166,11 @@ impl WaiterList {
         }
     }
 
-    pub unsafe fn empty(&self) -> bool {
+    pub unsafe fn is_empty(&self) -> bool {
         self.head == null()
     }
 
-    pub unsafe fn pop_many(&mut self, mut count: usize) -> WaiterList {
+    pub unsafe fn pop_front_many(&mut self, mut count: usize) -> WaiterList {
         if count == usize::MAX {
             return mem::replace(self, WaiterList::new());
         }
@@ -191,16 +193,16 @@ impl WaiterList {
         WaiterList { head: ret_head, tail: ret_tail }
     }
 
-    pub unsafe fn slice_split_1(&self) -> (*const Waiter, Self) {
-        let new_head = self.head.next();
-        if new_head == null() {
-            (self.head, WaiterList::new())
-        } else {
-            (self.head, WaiterList { head: new_head, tail: self.tail })
-        }
-    }
+    // pub unsafe fn slice_split_1(&self) -> (*const Waiter, Self) {
+    //     let new_head = self.head.next();
+    //     if new_head == null() {
+    //         (self.head, WaiterList::new())
+    //     } else {
+    //         (self.head, WaiterList { head: new_head, tail: self.tail })
+    //     }
+    // }
 
-    pub unsafe fn push(&mut self, waiter: *const Waiter) {
+    pub unsafe fn push_back(&mut self, waiter: *const Waiter) {
         if self.head == null() && self.tail == null() {
             *self = WaiterList { head: waiter, tail: waiter };
         } else {

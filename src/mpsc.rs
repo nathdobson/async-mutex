@@ -1,9 +1,9 @@
 use crate::sync::Arc;
 use crate::cell::UnsafeCell;
-use crate::futex::atomic::{Packable, Atomic};
+use crate::futex::{Packable, Atomic};
 use crate::futex::{Futex, WaitAction, Flow};
-use crate::futex::state::{CopyWaker, PANIC_WAKER_VTABLE};
-use crate::futex::atomic_impl::{usize2, IsAtomic, usize_half};
+use crate::futex::{CopyWaker, PANIC_WAKER_VTABLE};
+use crate::futex::{usize2, IsAtomic, usize_half};
 use crate::sync::atomic::AtomicBool;
 use std::marker::PhantomData;
 use crate::sync::atomic::Ordering::AcqRel;
@@ -16,7 +16,7 @@ use std::iter::repeat_with;
 use crate::sync::atomic::Ordering::Relaxed;
 use std::mem;
 use std::ptr::null;
-use crate::test_println;
+//use crate::test_println;
 use std::sync::mpsc::{SendError, RecvError};
 
 #[derive(Clone, Debug)]
@@ -136,7 +136,7 @@ impl<T> Inner<T> {
             let result = (*bucket).data.with_mut(|x| (*x).assume_init_read());
             self.recv_head.with_mut(|x| *x = (head + 1) % self.buckets.len());
             let lock = self.send_queue.lock();
-            lock.update_flip(|atom: SendState, queued| {
+            lock.fetch_update_enqueue(|atom: SendState, queued| {
                 if queued {
                     assert_eq!(atom.size, self.buckets.len());
                     Some(SendState { write_head: (atom.write_head + 1) % self.buckets.len(), size: atom.size })
@@ -152,7 +152,7 @@ impl<T> Inner<T> {
                     let message = waiter.message() as *const Message<T>;
                     (*bucket).write((*message).take())
                 });
-                waiter.done();
+                waiter.wake();
             }
             Poll::Ready(result)
         }).await

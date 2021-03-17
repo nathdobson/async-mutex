@@ -1,4 +1,8 @@
 use crate::sync::atomic::{Ordering, AtomicUsize, AtomicBool};
+#[cfg(target_has_atomic = "8")]
+use crate::sync::atomic::AtomicU8;
+#[cfg(target_has_atomic = "16")]
+use crate::sync::atomic::AtomicU16;
 #[cfg(target_has_atomic = "32")]
 use crate::sync::atomic::AtomicU32;
 #[cfg(target_has_atomic = "64")]
@@ -7,6 +11,7 @@ use crate::sync::atomic::AtomicU64;
 use crate::sync::atomic::AtomicU128;
 use std::fmt::Debug;
 
+/// Atomic unsigned integers (AtomicU8, AtomicUsize, etc.)
 pub trait IsAtomic: Debug {
     type Raw: Copy + HasAtomic<Impl=Self> + Debug;
     fn new(x: Self::Raw) -> Self;
@@ -29,6 +34,7 @@ pub trait IsAtomic: Debug {
     ) -> Result<Self::Raw, Self::Raw>;
 }
 
+/// Unsigned integers for which an atomic type exists.
 pub trait HasAtomic: Debug {
     type Impl: IsAtomic<Raw=Self> + Debug;
 }
@@ -80,6 +86,10 @@ macro_rules! atomic_impl (
 
 atomic_impl!(AtomicUsize, usize);
 atomic_impl!(AtomicBool, bool);
+#[cfg(target_has_atomic = "8")]
+atomic_impl!(AtomicU8, u8);
+#[cfg(target_has_atomic = "16")]
+atomic_impl!(AtomicU16, u16);
 #[cfg(target_has_atomic = "32")]
 atomic_impl!(AtomicU32, u32);
 #[cfg(target_has_atomic = "64")]
@@ -121,3 +131,4 @@ pub type usize_half = u16;
 #[allow(non_camel_case_types)]
 #[cfg(all(target_pointer_width = "64"))]
 pub type usize_half = u32;
+

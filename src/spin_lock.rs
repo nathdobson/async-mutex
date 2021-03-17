@@ -1,5 +1,5 @@
 use crate::cell::UnsafeCell;
-use crate::futex::atomic::Atomic;
+use crate::futex::Atomic;
 use crate::sync::atomic::Ordering::{Acquire, Relaxed};
 use crate::sync::atomic::AtomicBool;
 use crate::sync::atomic::Ordering::Release;

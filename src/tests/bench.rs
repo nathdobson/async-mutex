@@ -128,6 +128,10 @@ async_traits! {
         name mutex_trait;
         async fn lock = crate::Mutex::lock;
     }
+    impl<M: Send PLUS 'static> MutexTrait<M> for crate::fast_mutex::Mutex<M> as crate_fast_mutex {
+        name mutex_trait;
+        async fn lock = crate::fast_mutex::Mutex::lock;
+    }
     impl<M: Send PLUS 'static> MutexTrait<M> for crate::spin_lock::Mutex<M> as spin_lock_mutex {
         name mutex_trait;
         async fn lock = crate::spin_lock::Mutex::lock;
@@ -197,8 +201,8 @@ fn run_bench<I>(name: &str, iter: I) where I: Iterator<Item: 'static + Send + Fu
 }
 
 fn bench_mutex(name: &str, mutex: impl MutexTrait<usize>) {
-    let tasks = 100000usize;
-    let count = 10usize;
+    // let (tasks,count) = (100000usize,10usize);
+    let (tasks, count) = (1usize, 10000000usize);
     let mutex = Arc::new(mutex);
     run_bench(name, (0..tasks).map(move |task| {
         let mutex = mutex.clone();
@@ -242,8 +246,9 @@ fn bench_channel(name: &str, (sender, mut receiver): (impl SenderTrait<usize>, i
 fn bench_mutexes() {
     let rt = Runtime::new().unwrap();
     let rte = rt.enter();
-    bench_mutex("fair_mutex", crate_mutex(default()));
     bench_mutex("spin_lock", spin_lock_mutex(default()));
+    bench_mutex("fast_mutex", crate_fast_mutex(default()));
+    bench_mutex("mutex", crate_mutex(default()));
     bench_mutex("tokio", tokio_mutex(default()));
     bench_mutex("async_std", async_std_mutex(default()));
     //bench_mutex("futures_util::lock", futures_util::lock::Mutex::new, futures_util::lock::Mutex::lock);

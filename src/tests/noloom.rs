@@ -1,6 +1,6 @@
 use crate::{thread, Mutex};
 use crate::sync::Arc;
-use crate::tests::test::{IsTest, simple_test, cancel_test, condvar_test, channel_test, rwlock_test};
+use crate::tests::test::{IsTest, mutex_test, mutex_cancel_test, condvar_test, channel_test, rwlock_test, fast_mutex_test};
 use futures::executor::{LocalPool, ThreadPool};
 use crate::future::{block_on, Future, ready, poll_fn};
 use futures::task::{Spawn, SpawnExt};
@@ -18,7 +18,7 @@ use crate::condvar::Condvar;
 use crate::mpsc::channel;
 use Poll::Ready;
 use Poll::Pending;
-use crate::test_println;
+//use crate::test_println;
 use crate::tests::threadpool;
 
 fn run_with_spawner<T: IsTest>(test: T, spawner: &dyn Spawn) -> impl Future {
@@ -54,35 +54,6 @@ fn run_threaded<T: IsTest>(test: T) {
     block_on(fut);
 }
 
-#[test]
-fn test_simple_local() {
-    run_locally(simple_test(100))
-}
-
-#[test]
-fn test_simple_threaded() {
-    run_threaded(simple_test(100000));
-}
-
-//
-// #[test]
-// fn test_lock1() {
-//     let (test_waker, waker) = TestWaker::new();
-//     let mut cx = Context::from_waker(&waker);
-//     assert_eq!((1, 0), test_waker.load());
-//     let mutex = Mutex::new(1usize);
-//     {
-//         let fut = async {
-//             let mut guard = mutex.lock().await;
-//             ready(()).await;
-//             *guard += 1;
-//             *guard
-//         };
-//         pin_mut!(fut);
-//         assert_eq!(Poll::Ready(2), fut.poll(&mut cx));
-//     }
-//     assert_eq!((1, 0), test_waker.load());
-// }
 
 #[test]
 fn test_lock1() {
@@ -308,41 +279,37 @@ fn test_channel_recv_send_2() {
 }
 
 #[test]
-fn test_cancel_locally() {
-    run_locally(cancel_test(100, 100))
-}
+fn test_mutex_locally() { run_locally(mutex_test(100)) }
 
 #[test]
-fn test_cancel_threaded() {
-    run_threaded(cancel_test(100000, 100000))
-}
+fn test_mutex_threaded() { run_threaded(mutex_test(100000)); }
 
 #[test]
-fn test_condvar_locally() {
-    run_locally(condvar_test(1))
-}
+fn test_mutex_cancel_locally() { run_locally(mutex_cancel_test(100, 100)) }
 
 #[test]
-fn test_condvar_threaded() {
-    run_threaded(condvar_test(10000))
-}
+fn test_mutex_cancel_threaded() { run_threaded(mutex_cancel_test(20000, 20000)) }
 
 #[test]
-fn test_channel_locally() {
-    run_locally(channel_test(&[2], 1))
-}
+fn test_fast_mutex_locally() { run_locally(fast_mutex_test(100)) }
 
 #[test]
-fn test_channel_threaded() {
-    run_threaded(channel_test(&[10000; 10], 100))
-}
+fn test_fast_mutex_threaded() { run_threaded(fast_mutex_test(100000)); }
 
 #[test]
-fn test_rwlock_locally() {
-    run_locally(rwlock_test(1, 1))
-}
+fn test_condvar_locally() { run_locally(condvar_test(1)) }
 
 #[test]
-fn test_rwlock_threaded() {
-    run_threaded(rwlock_test(100000, 0))
-}
+fn test_condvar_threaded() { run_threaded(condvar_test(10000)) }
+
+#[test]
+fn test_channel_locally() { run_locally(channel_test(&[2], 1)) }
+
+#[test]
+fn test_channel_threaded() { run_threaded(channel_test(&[10000; 10], 100)) }
+
+#[test]
+fn test_rwlock_locally() { run_locally(rwlock_test(1, 1)) }
+
+#[test]
+fn test_rwlock_threaded() { run_threaded(rwlock_test(50000, 0)) }

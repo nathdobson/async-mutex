@@ -13,8 +13,8 @@ use std::sync::Weak;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable};
 use std::task::Waker;
 
-use crate::futex::atomic::{Atomic, Packable};
-use crate::futex::atomic_impl::{AtomicUsize2, usize2};
+use crate::futex::{Atomic, Packable};
+use crate::futex::{AtomicUsize2, usize2};
 use crate::cell::UnsafeCell;
 use crate::futex::{Futex, WaitFuture, WaitAction, Flow};
 use crate::future::Future;
@@ -22,9 +22,9 @@ use crate::sync::Arc;
 use crate::sync::atomic::AtomicBool;
 use crate::sync::atomic::AtomicUsize;
 use crate::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
-use crate::test_println;
+//use crate::test_println;
 use crate::util::{AsyncFnOnce, Bind, FnOnceExt};
-use crate::futex::waiter::Waiter;
+use crate::futex::Waiter;
 use core::time::Duration;
 use crate::sync::atomic::Ordering::SeqCst;
 
@@ -70,17 +70,14 @@ impl<T> Mutex<T> {
 
     pub(crate) unsafe fn unlock(&self) {
         let lock = self.futex.lock();
-        let mut is_queued = false;
-        lock.update_flip(|atom, queued| {
-            is_queued = queued;
-            (!queued).then_some(0)
-        });
-        if is_queued {
-            if let Some(waiter) = lock.pop(0) {
-                waiter.done();
+        let (_, queued) = lock.fetch_update_enqueue(|atom, queued| {
+            if queued {
+                None
+            } else {
+                Some(0)
             }
-        }
-        mem::drop(lock);
+        });
+        if queued { lock.pop(0).unwrap().wake(); }
     }
 }
 

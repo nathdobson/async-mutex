@@ -13,8 +13,8 @@ use std::sync::Weak;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable};
 use std::task::Waker;
 
-use crate::futex::atomic::{Atomic, Packable};
-use crate::futex::atomic_impl::{AtomicUsize2, usize2, usize_half};
+use crate::futex::{Atomic, Packable};
+use crate::futex::{AtomicUsize2, usize2, usize_half};
 use crate::cell::UnsafeCell;
 use crate::futex::{Futex, WaitFuture, WaitAction, Flow};
 use crate::future::Future;
@@ -22,9 +22,9 @@ use crate::sync::Arc;
 use crate::sync::atomic::AtomicBool;
 use crate::sync::atomic::AtomicUsize;
 use crate::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
-use crate::test_println;
+//use crate::test_println;
 use crate::util::{AsyncFnOnce, Bind, FnOnceExt};
-use crate::futex::waiter::Waiter;
+use crate::futex::Waiter;
 
 #[derive(Debug)]
 pub struct RwLock<T> {
@@ -120,7 +120,7 @@ impl<T> RwLock<T> {
     }
 
     pub(crate) unsafe fn read_unlock(&self) {
-        if self.futex.update(|mut atom: Atom| {
+        if self.futex.fetch_update(|mut atom: Atom| {
             if atom.readers == 1 && atom.writers > 0 {
                 None
             } else {
@@ -130,11 +130,11 @@ impl<T> RwLock<T> {
             return;
         }
         let lock = self.futex.lock();
-        lock.update_flip(|atom: Atom, queued| {
+        lock.fetch_update_enqueue(|atom: Atom, queued| {
             Some(Atom { readers: 0, ..atom })
         });
         if let Some(writer) = lock.pop(WRITE_QUEUE) {
-            writer.done();
+            writer.wake();
         } else {
             assert!(lock.pop(READ_QUEUE).is_none());
         }
@@ -143,7 +143,7 @@ impl<T> RwLock<T> {
     pub(crate) unsafe fn write_unlock(&self) {
         let lock = self.futex.lock();
         let mut waking = false;
-        lock.update_flip(|atom: Atom, queued| {
+        lock.fetch_update_enqueue(|atom: Atom, queued| {
             assert_eq!(atom.readers, 0);
             if atom.writers == 1 {
                 if queued {
@@ -161,16 +161,16 @@ impl<T> RwLock<T> {
         });
         if waking {
             if let Some(writer) = lock.pop(WRITE_QUEUE) {
-                writer.done();
+                writer.wake();
                 return;
             }
             let readers = lock.pop_many(usize::MAX, READ_QUEUE);
             let count = readers.count();
-            self.futex.update(|atom: Atom| {
+            self.futex.fetch_update(|atom: Atom| {
                 Some(Atom { readers: atom.readers + count - 1, ..atom })
             }).ok();
             for reader in readers {
-                reader.done();
+                reader.wake();
             }
         }
     }

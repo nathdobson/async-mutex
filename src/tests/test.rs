@@ -4,8 +4,8 @@ use futures::executor::{LocalPool, ThreadPool};
 use crate::future::block_on;
 use futures::task::{Spawn, SpawnExt};
 use futures::future::join_all;
-use crate::Mutex;
-use crate::test_println;
+use crate::{Mutex, fast_mutex};
+//use crate::test_println;
 use futures::future::poll_fn;
 use futures::pin_mut;
 use std::task::Poll;
@@ -69,7 +69,7 @@ impl<Start: Copy, Run: Copy, Stop: Copy> IsTest for Test<Start, Run, Stop>
     }
 }
 
-pub fn simple_test(tasks: usize) -> impl IsTest {
+pub fn mutex_test(tasks: usize) -> impl IsTest {
     Test {
         tasks,
         start: move || -> Mutex<usize>{
@@ -92,7 +92,30 @@ pub fn simple_test(tasks: usize) -> impl IsTest {
     }
 }
 
-pub fn cancel_test(locks: usize, cancels: usize) -> impl IsTest {
+pub fn fast_mutex_test(tasks: usize) -> impl IsTest {
+    Test {
+        tasks,
+        start: move || -> fast_mutex::Mutex<usize>{
+            test_println!("Creating mutex");
+            fast_mutex::Mutex::new(0)
+        },
+        run: move |mutex: Arc<fast_mutex::Mutex<usize>>, task| async move {
+            test_println!("Starting {}", task);
+            let mut lock = mutex.lock().await;
+            test_println!("Running  {}", task);
+            *lock |= task;
+        },
+        stop: move |mut mutex, _| {
+            let mut expected = 0;
+            for task in 0..tasks {
+                expected |= task;
+            }
+            assert_eq!(expected, *mutex.get_mut())
+        },
+    }
+}
+
+pub fn mutex_cancel_test(locks: usize, cancels: usize) -> impl IsTest {
     Test {
         tasks: locks + cancels,
         start: move || -> Mutex<usize>{

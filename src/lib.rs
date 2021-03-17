@@ -25,27 +25,35 @@
 #![feature(never_type)]
 #![feature(default_free_fn)]
 #![feature(int_bits_const)]
+#![feature(new_uninit)]
 
 #[cfg(test)]
 extern crate test;
 
+#[macro_use]
+mod async_traits;
+#[macro_use]
+mod util;
+
 pub(crate) use crate::loom::*;
 
-#[macro_use]
-pub mod async_traits;
-
 mod loom;
-mod util;
 #[cfg(test)]
 mod tests;
-pub mod fair_mutex;
-//pub mod unfair_mutex;
+mod fair_mutex;
 pub mod futex;
-pub mod spin_lock;
-pub mod condvar;
-pub mod mpsc;
-pub mod rwlock;
-//pub mod mpsc;
+mod spin_lock;
+mod condvar;
+mod mpsc;
+mod rwlock;
+pub mod fast_mutex;
 
 pub use fair_mutex::Mutex;
 pub use fair_mutex::MutexGuard;
+pub use condvar::Condvar;
+pub use rwlock::RwLock;
+pub use rwlock::ReadGuard;
+pub use rwlock::WriteGuard;
+pub use mpsc::channel;
+pub use mpsc::Receiver;
+pub use mpsc::Sender;

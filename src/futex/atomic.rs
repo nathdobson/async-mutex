@@ -5,10 +5,10 @@ use crate::futex::atomic_impl::{HasAtomic, IsAtomic};
 use std::fmt::{Debug, Formatter};
 use crate::sync::atomic::Ordering::Relaxed;
 
-/// An AtomicX containing a bitpacked `T` .
+/// An Atomic container for a bitpacked `T`, implemented using native atomics.
 pub struct Atomic<T>(<T::Raw as HasAtomic>::Impl, PhantomData<T>) where T: Packable, T::Raw: HasAtomic;
 
-/// Specify how to bitpack a value.
+/// Specify how to bitpack a value (typically into an unsigned integer type).
 pub trait Packable: Sized + Copy {
     type Raw;
     unsafe fn encode(val: Self) -> Self::Raw;
