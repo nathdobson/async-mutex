@@ -21,9 +21,9 @@ pub(in crate::futex) enum WaiterWaker {
 }
 
 #[derive(Eq, Ord, PartialOrd, PartialEq)]
-pub(in crate::futex) struct FutexAtom {
-    pub atom: usize,
-    pub inbox: *const Waiter,
+pub struct FutexAtom {
+    pub(in crate::futex) atom: usize,
+    pub(in crate::futex) inbox: *const Waiter,
 }
 
 impl CopyWaker {
@@ -72,6 +72,15 @@ impl FutexAtom {
             }
         }
         Result::<A>(self, PhantomData)
+    }
+    pub fn has_new_waiters(&self) -> bool {
+        self.inbox != null()
+    }
+    pub unsafe fn inner<A: Packable<Raw=usize>>(&self) -> A {
+        A::decode(self.atom)
+    }
+    pub unsafe fn set_inner<A: Packable<Raw=usize>>(&mut self, new: A) {
+        self.atom = A::encode(new);
     }
 }
 

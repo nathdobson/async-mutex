@@ -22,7 +22,7 @@ pub struct Condvar {
 
 impl Condvar {
     pub fn new() -> Self {
-        Condvar { futex: Futex::new(0, 1) }
+        Condvar { futex: Futex::new(0usize, 1) }
     }
     pub async fn wait<'g, T>(&self, guard: MutexGuard<'g, T>) -> MutexGuard<'g, T> {
         unsafe {
@@ -44,7 +44,8 @@ impl Condvar {
     }
     pub fn notify<T>(&self, guard: &mut MutexGuard<T>, count: usize) {
         unsafe {
-            let mutex: *const Mutex<T> = self.futex.load(Acquire);
+            let mut atom = self.futex.load(Acquire);
+            let mutex = atom.inner::<*const Mutex<T>>();
             if mutex == null() {
                 test_println!("Unused condvar");
                 return;
@@ -52,11 +53,13 @@ impl Condvar {
             if guard.mutex as *const Mutex<T> != mutex {
                 panic!("Different mutex");
             }
-            let lock = self.futex.lock();
-            lock.fetch_update_enqueue(|_: usize, _| None);
-            let waiters = lock.pop_many(count, 0);
-            test_println!("Requeueing {:?}", waiters);
-            lock.requeue(&guard.mutex.futex, waiters);
+            let mut waiters = self.futex.lock();
+            let mut queue = waiters.lock();
+            while !queue.cmpxchg_enqueue_weak(&mut atom, mutex, Acquire, Relaxed) {}
+            let list = queue.pop_many(count, 0);
+            test_println!("Requeueing {:?}", list);
+            mem::drop(queue);
+            waiters.requeue(&guard.mutex.futex, list);
         }
     }
     pub fn notify_all<T>(&self, guard: &mut MutexGuard<T>) {

@@ -90,3 +90,9 @@ impl Packable for usize {
     unsafe fn encode(val: Self) -> Self::Raw { val }
     unsafe fn decode(val: Self::Raw) -> Self { val }
 }
+
+impl Packable for u8 {
+    type Raw = u8;
+    unsafe fn encode(val: Self) -> Self::Raw { val }
+    unsafe fn decode(val: Self::Raw) -> Self { val }
+}

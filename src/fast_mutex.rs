@@ -20,7 +20,7 @@ use crate::sync::atomic::AtomicBool;
 use crate::sync::atomic::AtomicUsize;
 use crate::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use crate::util::{AsyncFnOnce, Bind, FnOnceExt};
-use crate::futex::{Futex, WaitAction, Packable, Flow, usize_half};
+use crate::futex::{Futex, WaitAction, Packable, Flow, usize_half, Atomic};
 
 #[derive(Debug)]
 pub struct Mutex<T> {
@@ -115,27 +115,59 @@ impl<T> Mutex<T> {
 
     pub fn unlock<'a>(&'a self) {
         unsafe {
-            if self.futex.fetch_update(|atom: Atom| {
-                assert!(atom.locked);
+            let mut futex_atom = self.futex.load(Relaxed);
+            loop {
+                let atom = futex_atom.inner::<Atom>();
                 if atom.waking || atom.waiters == 0 {
-                    Some(Atom { locked: false, ..atom })
+                    if self.futex.cmpxchg_weak(
+                        &mut futex_atom,
+                        Atom { locked: false, ..atom },
+                        Release, Relaxed) {
+                        return;
+                    }
+                } else if atom.waking {
+                    return;
                 } else {
-                    None
+                    break;
                 }
-            }).is_ok() {
-                return;
             }
-            let lock = self.futex.lock();
-            let (atom, queued) = lock.fetch_update_enqueue(|atom: Atom, queued| {
-                assert_eq!(atom.waiters != 0, queued);
-                if queued {
-                    Some(Atom { locked: false, waking: true, waiters: atom.waiters })
+            let mut waiters = self.futex.lock();
+            let mut queue = waiters.lock();
+            let had_waiters = !queue.is_empty(0);
+            let mut atom;
+            loop {
+                atom = futex_atom.inner::<Atom>();
+                if had_waiters {
+                    if self.futex.cmpxchg_weak(
+                        &mut futex_atom,
+                        Atom { locked: false, waking: true, ..atom },
+                        Release, Relaxed) {
+
+                        break;
+                    }
+                } else if futex_atom.has_new_waiters() {
+                    if queue.cmpxchg_enqueue_weak(
+                        &mut futex_atom,
+                        Atom { locked: false, waking: true, ..atom },
+                        AcqRel, Relaxed,
+                    ) {
+                        break;
+                    }
                 } else {
-                    Some(Atom { locked: false, waking: false, waiters: 0 })
+                    assert_eq!(atom.waiters, 0);
+                    if self.futex.cmpxchg_weak(
+                        &mut futex_atom,
+                        Atom { locked: false, waking: false, waiters: 0 },
+                        Release, Relaxed,
+                    ) {
+                        return;
+                    }
                 }
-            });
-            if queued && !atom.waking {
-                lock.pop(0).unwrap().wake();
+            }
+            if !atom.waking {
+                let waiter = queue.pop(0).unwrap();
+                mem::drop(queue);
+                waiter.wake();
             }
         }
     }

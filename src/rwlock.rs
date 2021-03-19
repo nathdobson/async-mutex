@@ -120,57 +120,99 @@ impl<T> RwLock<T> {
     }
 
     pub(crate) unsafe fn read_unlock(&self) {
-        if self.futex.fetch_update(|mut atom: Atom| {
+        test_println!("Read unlocking");
+        let mut futex_atom = self.futex.load(Relaxed);
+        loop {
+            let atom = futex_atom.inner::<Atom>();
             if atom.readers == 1 && atom.writers > 0 {
-                None
+                break;
             } else {
-                Some(Atom { readers: atom.readers - 1, ..atom })
+                if self.futex.cmpxchg_weak(
+                    &mut futex_atom,
+                    Atom { readers: atom.readers - 1, ..atom },
+                    Release, Relaxed) {
+                    return;
+                }
             }
-        }).is_ok() {
-            return;
         }
-        let lock = self.futex.lock();
-        lock.fetch_update_enqueue(|atom: Atom, queued| {
-            Some(Atom { readers: 0, ..atom })
-        });
-        if let Some(writer) = lock.pop(WRITE_QUEUE) {
+        let mut waiters = self.futex.lock();
+        let mut queue = waiters.lock();
+        let writers: usize;
+        loop {
+            let atom = futex_atom.inner::<Atom>();
+            if queue.cmpxchg_enqueue_weak(&mut futex_atom, Atom { readers: 0, ..atom }, AcqRel, Relaxed) {
+                writers = atom.writers;
+                break;
+            }
+        }
+        if let Some(writer) = queue.pop(WRITE_QUEUE) {
+            assert!(writers > 0);
+            mem::drop(queue);
             writer.wake();
         } else {
-            assert!(lock.pop(READ_QUEUE).is_none());
+            assert_eq!(writers, 0);
+            assert!(queue.pop(READ_QUEUE).is_none());
         }
     }
 
     pub(crate) unsafe fn write_unlock(&self) {
-        let lock = self.futex.lock();
-        let mut waking = false;
-        lock.fetch_update_enqueue(|atom: Atom, queued| {
+        test_println!("Write unlocking");
+        let mut waiters = self.futex.lock();
+        let mut queue = waiters.lock();
+        let mut futex_atom = self.futex.load(Relaxed);
+        let has_readers=!queue.is_empty(READ_QUEUE);
+        loop {
+            let atom = futex_atom.inner::<Atom>();
             assert_eq!(atom.readers, 0);
-            if atom.writers == 1 {
-                if queued {
-                    // Downgrade to a read lock so it's safe to wake other readers.
-                    waking = true;
-                    Some(Atom { writers: 0, readers: 1 })
+            if atom.writers == 1 && !has_readers && !futex_atom.has_new_waiters() {
+                mem::drop(queue);
+                if self.futex.cmpxchg_weak(
+                    &mut futex_atom,
+                    Atom { writers: 0, readers: 0 },
+                    Release, Relaxed) {
+                    test_println!("Write unlocked no waiters");
+                    return;
                 } else {
-                    waking = false;
-                    Some(Atom { writers: 0, readers: 0 })
+                    queue = waiters.lock();
+                }
+            } else if atom.writers == 1 {
+                // Downgrade to a read lock so other readers don't think they're the leader.
+                if queue.cmpxchg_enqueue_weak(
+                    &mut futex_atom,
+                    Atom { writers: 0, readers: 1 },
+                    AcqRel, Relaxed) {
+                    assert!(queue.pop(WRITE_QUEUE).is_none());
+                    let readers = queue.pop_many(usize::MAX, READ_QUEUE);
+                    mem::drop(queue);
+                    let count = readers.count();
+                    futex_atom.set_inner(Atom { writers: 0, readers: 1 });
+                    loop {
+                        let atom = futex_atom.inner::<Atom>();
+                        if self.futex.cmpxchg_weak(
+                            &mut futex_atom,
+                            Atom { readers: atom.readers + count - 1, ..atom },
+                            Relaxed, Relaxed) {
+                            break;
+                        }
+                    }
+                    for reader in readers {
+                        reader.wake();
+                    }
+                    test_println!("Write unlocked to readers");
+                    return;
                 }
             } else {
-                waking = true;
-                Some(Atom { writers: atom.writers - 1, readers: 0 })
-            }
-        });
-        if waking {
-            if let Some(writer) = lock.pop(WRITE_QUEUE) {
-                writer.wake();
-                return;
-            }
-            let readers = lock.pop_many(usize::MAX, READ_QUEUE);
-            let count = readers.count();
-            self.futex.fetch_update(|atom: Atom| {
-                Some(Atom { readers: atom.readers + count - 1, ..atom })
-            }).ok();
-            for reader in readers {
-                reader.wake();
+                if queue.cmpxchg_enqueue_weak(
+                    &mut futex_atom,
+                    Atom { writers: atom.writers - 1, ..atom },
+                    AcqRel, Relaxed) {
+                    assert!(atom.writers > 1);
+                    let writer = queue.pop(WRITE_QUEUE).unwrap();
+                    mem::drop(queue);
+                    writer.wake();
+                    test_println!("Write unlocked to writer");
+                    return;
+                }
             }
         }
     }

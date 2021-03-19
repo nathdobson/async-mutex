@@ -2,6 +2,7 @@ mod atomic;
 mod atomic_impl;
 mod state;
 mod waiter;
+mod atomic_refcell;
 //mod send_mutex;
 
 use crate::futex::waiter::{FutexOwner};
@@ -14,7 +15,7 @@ use crate::future::Future;
 use std::task::{Context, Poll, Waker};
 use std::pin::Pin;
 use crate::sync::atomic::Ordering;
-use crate::futex::state::{FutexAtom, WaiterWaker};
+use crate::futex::state::{WaiterWaker};
 use crate::sync::atomic::Ordering::Acquire;
 use crate::sync::atomic::Ordering::AcqRel;
 use std::{mem, fmt};
@@ -27,15 +28,17 @@ use std::fmt::{Debug, Formatter};
 
 pub use waiter::Waiter;
 pub use waiter::WaiterList;
-pub use state::{CopyWaker, PANIC_WAKER_VTABLE};
+pub use state::{CopyWaker, PANIC_WAKER_VTABLE, FutexAtom};
 #[cfg(test)]
 pub use state::test_packable;
 pub use atomic::{Atomic, Packable};
 pub use atomic_impl::{HasAtomic, IsAtomic, usize2, usize_half, AtomicUsize2};
+use crate::futex::atomic_refcell::{AtomicRefCell, RefMut};
+use std::ops::DerefMut;
 
 #[derive(Debug)]
 struct FutexState {
-    queues: UnsafeCell<Vec<WaiterList>>,
+    queues: Vec<WaiterList>,
 }
 
 /// A synchronization primitive akin to a futex in linux.
@@ -56,7 +59,7 @@ struct FutexState {
 #[derive(Debug)]
 pub struct Futex {
     futex_atom: Atomic<FutexAtom>,
-    state: RwLock<FutexState>,
+    state: RwLock<AtomicRefCell<FutexState>>,
 }
 
 #[derive(Clone, Copy)]
@@ -76,10 +79,20 @@ pub struct WaitAction<A, R, P> {
     pub flow: Flow<R, P>,
 }
 
-pub struct FutexLock<'a> {
-    futex: &'a Futex,
-    state: RwLockReadGuard<'a, FutexState>,
+pub struct FutexWaitersGuard<'waiter> {
+    futex: &'waiter Futex,
+    read_guard: RwLockReadGuard<'waiter, AtomicRefCell<FutexState>>,
 }
+
+pub struct FutexQueueGuard<'queue, 'waiter> {
+    futex: &'waiter Futex,
+    ref_mut: RefMut<'queue, FutexState>,
+}
+
+fn assert_variance1<'a: 'b, 'b>(x: FutexWaitersGuard<'a>) -> FutexWaitersGuard<'b> { x }
+
+fn assert_variance2<'a1: 'b1, 'b1, 'a2: 'b2, 'b2>(x: FutexQueueGuard<'a1, 'a2>) -> FutexQueueGuard<'b1, 'b2> { x }
+
 
 #[must_use = "with does nothing unless polled/`await`-ed"]
 pub struct WaitFuture<'a, A, R, P, Call, OnPending, OnCancelWoken, OnCancelSleeping>
@@ -109,41 +122,55 @@ impl Futex {
         unsafe {
             Futex {
                 futex_atom: Atomic::new(FutexAtom { atom: T::encode(atom), inbox: null() }),
-                state: RwLock::new(FutexState {
-                    queues: UnsafeCell::new(vec![WaiterList::new(); queues])
-                }),
+                state: RwLock::new(AtomicRefCell::new(FutexState {
+                    queues: vec![WaiterList::new(); queues]
+                })),
             }
         }
     }
 
-    // Atomically retrieve the value
-    pub unsafe fn load<A: Packable<Raw=usize>>(&self, order: Ordering) -> A {
-        A::decode(self.futex_atom.load(order).atom)
+    // Atomically retrieve the state
+    pub unsafe fn load(&self, order: Ordering) -> FutexAtom {
+        self.futex_atom.load(order)
+    }
+
+    pub unsafe fn cmpxchg_weak<A: Packable<Raw=usize> + Debug>(&self, current: &mut FutexAtom, new: A, success: Ordering, failure: Ordering) -> bool {
+        let new = FutexAtom { atom: A::encode(new), inbox: current.inbox };
+        self.cmpxchg_weak_all::<A>(current, new, success, failure)
+    }
+
+    unsafe fn cmpxchg_weak_all<A: Packable<Raw=usize> + Debug>(&self, current: &mut FutexAtom, new: FutexAtom, success: Ordering, failure: Ordering) -> bool {
+        if self.futex_atom.cmpxchg_weak(current, new, success, failure) {
+            test_println!("from {:?}\n  to {:?}", current.debug::<A > (), new.debug::<A > ());
+            true
+        } else {
+            false
+        }
     }
 
     // Atomically applies a function to the atom, ignoring queues.
-    pub unsafe fn fetch_update<A, F>(
-        &self,
-        mut update: F,
-    ) -> Result<A, A>
-        where A: Packable<Raw=usize> + Debug,
-              F: FnMut(A) -> Option<A>
-    {
-        let mut futex_atom = self.futex_atom.load(Acquire);
-        loop {
-            let atom = A::decode(futex_atom.atom);
-            if let Some(atom) = update(atom) {
-                let new_atom = FutexAtom { atom: A::encode(atom), inbox: futex_atom.inbox };
-                if self.cmpxchg_weak::<A>(
-                    &mut futex_atom, new_atom,
-                    AcqRel, Acquire) {
-                    return Ok(atom);
-                }
-            } else {
-                return Err(atom);
-            }
-        }
-    }
+    // pub unsafe fn fetch_update<A, F>(
+    //     &self,
+    //     mut update: F,
+    // ) -> Result<A, A>
+    //     where A: Packable<Raw=usize> + Debug,
+    //           F: FnMut(A) -> Option<A>
+    // {
+    //     let mut futex_atom = self.futex_atom.load(Acquire);
+    //     loop {
+    //         let atom = A::decode(futex_atom.atom);
+    //         if let Some(atom) = update(atom) {
+    //             let new_atom = FutexAtom { atom: A::encode(atom), inbox: futex_atom.inbox };
+    //             if self.cmpxchg_weak::<A>(
+    //                 &mut futex_atom, new_atom,
+    //                 AcqRel, Acquire) {
+    //                 return Ok(atom);
+    //             }
+    //         } else {
+    //             return Err(atom);
+    //         }
+    //     }
+    // }
 
     /// Atomically update the atom and block if requested. Enqueue operations that <em>read-from</em>
     /// this operation will enqueue the `Waiter`.
@@ -186,18 +213,18 @@ impl Futex {
     /// Perform a read-lock in order to access the queue. Cancellation will obtain the associated
     /// write lock. This lock is used to exclude simultaneous cancellation, not synchronize
     /// notification.
-    pub fn lock(&self) -> FutexLock {
-        FutexLock {
+    pub fn lock<'waiters>(&'waiters self) -> FutexWaitersGuard<'waiters> {
+        FutexWaitersGuard {
             futex: self,
-            state: self.state.read().unwrap(),
+            read_guard: self.state.read().unwrap(),
         }
     }
 
-    unsafe fn enqueue(&self, state: &FutexState, stack: *const Waiter) {
+    unsafe fn enqueue(&self, state: &mut FutexState, stack: *const Waiter) {
         let mut list = WaiterList::from_stack(stack);
         while let Some(waiter) = list.pop_front() {
             waiter.futex().store(FutexOwner { first: null(), second: self }, Relaxed);
-            state.queues.with_mut(|queues| (*queues)[waiter.queue()].push_back(waiter));
+            state.queues[waiter.queue()].push_back(waiter);
         }
     }
 
@@ -208,7 +235,7 @@ impl Futex {
                 break;
             } else {
                 let new_atom = FutexAtom { inbox: null(), ..atom };
-                if self.cmpxchg_weak::<usize>(&mut atom, new_atom, AcqRel, Acquire) {
+                if self.cmpxchg_weak_all::<usize>(&mut atom, new_atom, AcqRel, Acquire) {
                     self.enqueue(state, atom.inbox);
                     break;
                 }
@@ -217,7 +244,7 @@ impl Futex {
     }
 
     unsafe fn cancel(&self, state: &mut FutexState, waiter: *const Waiter) {
-        state.queues.with_mut(|queues| (*queues)[waiter.queue()].remove(waiter));
+        state.queues[waiter.queue()].remove(waiter);
     }
 
     pub(crate) unsafe fn unsafe_debug<'a>(&'a self) -> impl 'a + Debug {
@@ -227,72 +254,86 @@ impl Futex {
                 unsafe {
                     f.debug_struct("Futex")
                         .field("atom", &self.0.futex_atom)
-                        .field("state", &self.0.lock().unsafe_debug()).finish()
+                        .field("state", &self.0.lock().lock().unsafe_debug()).finish()
                 }
             }
         }
         Imp(self)
     }
 
-    unsafe fn cmpxchg_weak<A: Packable<Raw=usize> + Debug>(&self, futex_atom: &mut FutexAtom, new_futex_atom: FutexAtom, success: Ordering, failure: Ordering) -> bool {
-        if self.futex_atom.cmpxchg_weak(futex_atom, new_futex_atom, success, failure) {
-            test_println!("from {:?}\n  to {:?}", futex_atom.debug::<A>(), new_futex_atom.debug::<A>());
-            true
-        } else {
-            false
-        }
-    }
+    // unsafe fn cmpxchg_weak<A: Packable<Raw=usize> + Debug>(&self, futex_atom: &mut FutexAtom, new_futex_atom: FutexAtom, success: Ordering, failure: Ordering) -> bool {
+    //     if self.futex_atom.cmpxchg_weak(futex_atom, new_futex_atom, success, failure) {
+    //         test_println!("from {:?}\n  to {:?}", futex_atom.debug::<A>(), new_futex_atom.debug::<A>());
+    //         true
+    //     } else {
+    //         false
+    //     }
+    // }
 }
 
-/// While this is a read-lock, none of the methods on a `FutexLock` or a `Waiter` may be called
-/// simultaneously. Synchronization is left to the caller.
-impl<'a> FutexLock<'a> {
+impl<'queue, 'waiters> FutexQueueGuard<'queue, 'waiters> {
     /// * `update`: Called with the old atom and a bool indicating if there are any `Waiter`s.
     ///
     /// Atomically updates the current atom while ensuring new `Waiter`s
     /// are placed in the appropriate queues.
-    pub unsafe fn fetch_update_enqueue<A, F>(
-        &self,
-        mut update: F,
-    ) -> (A, bool)
-        where A: Packable<Raw=usize> + Debug,
-              F: FnMut(A, bool) -> Option<A>
-    {
-        let queued = self.state.queues.with_mut(|queues| (*queues).iter().any(|queue| !queue.is_empty()));
-        let mut futex_atom = self.futex.futex_atom.load(Acquire);
-        loop {
-            let old_atom = A::decode(futex_atom.atom);
-            if futex_atom.inbox == null() {
-                if let Some(atom) = update(old_atom, queued) {
-                    let new_futex_atom = FutexAtom { atom: A::encode(atom), inbox: null() };
-                    if self.futex.cmpxchg_weak::<A>(&mut futex_atom, new_futex_atom, AcqRel, Acquire) {
-                        return (old_atom, queued);
-                    }
-                } else {
-                    return (old_atom, queued);
+
+    pub fn cmpxchg_enqueue_weak<A: Packable<Raw=usize>>(&mut self, current: &mut FutexAtom, new: A, success: Ordering, failure: Ordering) -> bool {
+        unsafe {
+            assert!(success == Acquire || success == AcqRel);
+            let new = FutexAtom { atom: A::encode(new), inbox: null() };
+            if self.futex.futex_atom.cmpxchg_weak(current, new, success, failure) {
+                if current.inbox != null() {
+                    self.futex.enqueue(&mut *self.ref_mut, current.inbox);
                 }
+                true
             } else {
-                let atom;
-                if let Some(decoded) = update(old_atom, true) {
-                    atom = A::encode(decoded)
-                } else {
-                    atom = futex_atom.atom;
-                }
-                let new_futex_atom = FutexAtom { atom, inbox: null() };
-                if self.futex.cmpxchg_weak::<A>(&mut futex_atom, new_futex_atom, AcqRel, Acquire) {
-                    self.futex.enqueue(&*self.state, futex_atom.inbox);
-                    return (old_atom, true);
-                }
+                false
             }
         }
     }
+
+    // pub unsafe fn fetch_update_enqueue<A, F>(
+    //     mut self,
+    //     mut update: F,
+    // ) -> (A, bool)
+    //     where A: Packable<Raw=usize> + Debug,
+    //           F: FnMut(A, bool) -> (Option<Self>, Option<A>)
+    // {
+    //     let queued = self.ref_mut.queues.iter().any(|queue| !queue.is_empty());
+    //     let mut futex_atom = self.futex.futex_atom.load(Acquire);
+    //     loop {
+    //         let old_atom = A::decode(futex_atom.atom);
+    //         if futex_atom.inbox == null() {
+    //             if let Some(atom) = update(old_atom, queued) {
+    //                 let new_futex_atom = FutexAtom { atom: A::encode(atom), inbox: null() };
+    //                 if self.futex.cmpxchg_weak::<A>(&mut futex_atom, new_futex_atom, AcqRel, Acquire) {
+    //                     return (old_atom, queued);
+    //                 }
+    //             } else {
+    //                 return (old_atom, queued);
+    //             }
+    //         } else {
+    //             let atom;
+    //             if let Some(decoded) = update(old_atom, true) {
+    //                 atom = A::encode(decoded)
+    //             } else {
+    //                 atom = futex_atom.atom;
+    //             }
+    //             let new_futex_atom = FutexAtom { atom, inbox: null() };
+    //             if self.futex.cmpxchg_weak::<A>(&mut futex_atom, new_futex_atom, AcqRel, Acquire) {
+    //                 self.futex.enqueue(&mut *self.ref_mut, futex_atom.inbox);
+    //                 return (old_atom, true);
+    //             }
+    //         }
+    //     }
+    // }
 
     /// * `queue`: the index of the queue to access.
     ///
     /// Pops one `Waiter` off the queue, or returns None if there were no waiters during the last
     /// `fetch_update_enqueue` operation.
-    pub unsafe fn pop(&self, queue: usize) -> Option<*const Waiter> {
-        self.state.queues.with_mut(|queues| (*queues)[queue].pop_front())
+    pub unsafe fn pop(&mut self, queue: usize) -> Option<*const Waiter> {
+        self.ref_mut.queues[queue].pop_front()
     }
 
     /// * `count`: The maximum number of `Waiter`s to retrieve (specify `usize::MAX` for no maximum).
@@ -301,27 +342,35 @@ impl<'a> FutexLock<'a> {
     /// Pops up to `count` `Waiter`s off the queue, ignoring `Waiter`s added after the
     /// last `fetch_update_enqueue` operation.
     /// `enqueue` operation.
-    pub unsafe fn pop_many(&self, count: usize, queue: usize) -> WaiterList {
-        self.state.queues.with_mut(|queues| {
-            test_println!("Queue is {:?}", (*queues));
-            (*queues)[queue].pop_front_many(count)
-        })
+    pub unsafe fn pop_many(&mut self, count: usize, queue: usize) -> WaiterList {
+        test_println!("Queue is {:?}", self.ref_mut.queues);
+        self.ref_mut.queues[queue].pop_front_many(count)
+    }
+
+    ///
+    pub unsafe fn is_empty(&mut self, queue: usize) -> bool {
+        self.ref_mut.queues[queue].is_empty()
     }
 
     pub(crate) unsafe fn unsafe_debug<'b>(&'b self) -> impl 'b + Debug {
-        struct Imp<'a>(&'a FutexLock<'a>);
-        impl<'a> Debug for Imp<'a> {
+        struct Imp<'a, 'queue, 'waiters>(&'a FutexQueueGuard<'queue, 'waiters>);
+        impl<'a, 'queue, 'waiters> Debug for Imp<'a, 'queue, 'waiters> {
             fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
                 unsafe {
-                    self.0.state.queues.with_mut(|queues|
-                        f.debug_list().entries((*queues).iter().map(|x| x as &dyn Debug)).finish()
-                    )
+                    f.debug_list().entries(self.0.ref_mut.queues.iter().map(|x| x as &dyn Debug)).finish()
                 }
             }
         }
         Imp(self)
     }
+}
 
+/// While this is a read-lock, none of the methods on a `FutexLock` or a `Waiter` may be called
+/// simultaneously. Synchronization is left to the caller.
+impl<'waiters> FutexWaitersGuard<'waiters> {
+    pub fn lock<'queue>(&'queue self) -> FutexQueueGuard<'queue, 'waiters> {
+        FutexQueueGuard { futex: self.futex, ref_mut: self.read_guard.borrow_mut() }
+    }
     /// Atomically transfer these waiters to another futex, as if `wait` had been called on that
     /// `Futex`.
     pub unsafe fn requeue(&self, to: &Futex, list: WaiterList) {
@@ -335,7 +384,7 @@ impl<'a> FutexLock<'a> {
         loop {
             list.head.set_prev(atom.inbox);
             let new_atom = FutexAtom { atom: atom.atom, inbox: list.tail };
-            if to.cmpxchg_weak::<usize>(
+            if to.cmpxchg_weak_all::<usize>(
                 &mut atom, new_atom, AcqRel, Acquire) {
                 return;
             }
@@ -362,7 +411,7 @@ WaitFuture<'a, A, R, P, Call, OnPending, OnCancelWoken, OnCancelSleeping>
                 Flow::Ready(control) => {
                     if let Some(atom) = result.update {
                         let new_futex_atom = FutexAtom { atom: A::encode(atom), ..futex_atom };
-                        if !self.original_futex.cmpxchg_weak::<A>(&mut futex_atom, new_futex_atom, AcqRel, Acquire) {
+                        if !self.original_futex.cmpxchg_weak_all::<A>(&mut futex_atom, new_futex_atom, AcqRel, Acquire) {
                             continue;
                         }
                     }
@@ -387,7 +436,7 @@ WaitFuture<'a, A, R, P, Call, OnPending, OnCancelWoken, OnCancelSleeping>
                             futex_atom.atom
                         };
                     let new_futex_atom = FutexAtom { inbox: waiter, atom };
-                    if self.original_futex.cmpxchg_weak::<A>(&mut futex_atom, new_futex_atom, AcqRel, Acquire) {
+                    if self.original_futex.cmpxchg_weak_all::<A>(&mut futex_atom, new_futex_atom, AcqRel, Acquire) {
                         self.step = WaitFutureStep::Waiting;
                         (self.on_pending)(&mut control);
                         self.result = Some(control);
@@ -461,17 +510,17 @@ Drop for WaitFuture<'a, A, R, P, Call, OnPending, OnCancelWoken, OnCancelSleepin
                     loop {
                         let mut owner = self.waiter.as_ptr().futex().load(Relaxed);
                         let mut second = (*owner.second).state.write().unwrap();
-                        (*owner.second).flip(&mut *second);
+                        (*owner.second).flip(&mut *second.get_mut());
                         if owner.first == null() {
                             let mut owner2 = self.waiter.as_ptr().futex().load(Relaxed);
                             if owner2 == owner {
-                                (*owner.second).cancel(&mut *second, self.waiter.as_ptr());
+                                (*owner.second).cancel(&mut *second.get_mut(), self.waiter.as_ptr());
                                 break;
                             }
                         } else {
                             let mut owner2 = self.waiter.as_ptr().futex().load(Relaxed);
                             if owner2 == (FutexOwner { first: null(), second: owner.second }) {
-                                (*owner.second).cancel(&mut *second, self.waiter.as_ptr());
+                                (*owner.second).cancel(&mut *second.get_mut(), self.waiter.as_ptr());
                                 break;
                             }
                             mem::drop(second);

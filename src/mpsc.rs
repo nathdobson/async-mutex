@@ -135,16 +135,46 @@ impl<T> Inner<T> {
             test_println!("Unfilled {:?}", head);
             let result = (*bucket).data.with_mut(|x| (*x).assume_init_read());
             self.recv_head.with_mut(|x| *x = (head + 1) % self.buckets.len());
-            let lock = self.send_queue.lock();
-            lock.fetch_update_enqueue(|atom: SendState, queued| {
-                if queued {
+            let mut waiters = self.send_queue.lock();
+            let mut queue = waiters.lock();
+
+            let mut waiter = queue.pop(0);
+            if waiter.is_some() {
+                let mut futex_atom = self.send_queue.load(Relaxed);
+                loop {
+                    let atom = futex_atom.inner::<SendState>();
                     assert_eq!(atom.size, self.buckets.len());
-                    Some(SendState { write_head: (atom.write_head + 1) % self.buckets.len(), size: atom.size })
-                } else {
-                    Some(SendState { write_head: atom.write_head, size: atom.size - 1 })
+                    if self.send_queue.cmpxchg_weak(
+                        &mut futex_atom,
+                        SendState { write_head: (atom.write_head + 1) % self.buckets.len(), size: atom.size },
+                        AcqRel, Relaxed) {
+                        break;
+                    }
                 }
-            });
-            let waiter = lock.pop(0);
+            } else {
+                let mut futex_atom = self.send_queue.load(Relaxed);
+                loop {
+                    let atom = futex_atom.inner::<SendState>();
+                    if futex_atom.has_new_waiters() {
+                        assert_eq!(atom.size, self.buckets.len());
+                        if queue.cmpxchg_enqueue_weak(
+                            &mut futex_atom,
+                            SendState { write_head: (atom.write_head + 1) % self.buckets.len(), size: atom.size },
+                            AcqRel, Relaxed,
+                        ) {
+                            break;
+                        }
+                    } else {
+                        if queue.cmpxchg_enqueue_weak(
+                            &mut futex_atom,
+                            SendState { write_head: atom.write_head, size: atom.size - 1 },
+                            AcqRel, Relaxed) {
+                            break;
+                        }
+                    }
+                }
+                waiter = queue.pop(0);
+            }
             if let Some(waiter) = waiter {
                 (*bucket).filled.store_mut(true);
                 test_println!("Backfilled {:?}",head);
