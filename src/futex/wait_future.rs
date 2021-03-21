@@ -11,7 +11,6 @@ use crate::sync::atomic::Ordering::Relaxed;
 use crate::future::Future;
 use std::pin::Pin;
 use std::ptr::null;
-use crate::futex::waiter::FutexOwner;
 
 #[derive(Clone, Copy)]
 pub(in crate::futex) enum WaitFutureStep {
@@ -137,24 +136,21 @@ Drop for WaitFuture<'a, A, Success, Failure, OnPending, OnCancelWoken, OnCancelS
             match mem::replace(&mut self.step, WaitFutureStep::Done) {
                 WaitFutureStep::Enter => {}
                 WaitFutureStep::Waiting => {
+                    let mut owner = self.waiter.futex().load(Relaxed);
                     loop {
-                        let mut owner = self.waiter.futex().load(Relaxed);
-                        let mut second = (*owner.second).state.write().unwrap();
-                        (*owner.second).flip(&mut *second.get_mut());
-                        if owner.first == null() {
-                            let mut owner2 = self.waiter.futex().load(Relaxed);
-                            if owner2 == owner {
-                                (*owner.second).cancel(&mut *second.get_mut(), self.waiter);
-                                break;
-                            }
+                        let mut lock = (*owner).state.write().unwrap();
+                        let mut owner2 = self.waiter.futex().load(Relaxed);
+                        if owner == owner2 {
+                            // By obtaining a write lock, we ensure that no requeue operations are
+                            // in progress, so the second load is correct.
+                            (*owner).flip(lock.get_mut());
+                            (*owner).cancel(lock.get_mut(), self.waiter);
+                            break;
                         } else {
-                            let mut owner2 = self.waiter.futex().load(Relaxed);
-                            if owner2 == (FutexOwner { first: null(), second: owner.second }) {
-                                (*owner.second).cancel(&mut *second.get_mut(), self.waiter);
-                                break;
-                            }
-                            mem::drop(second);
-                            mem::drop((*owner.first).state.write().unwrap());
+                            // The waiter was requeued while attempting to obtain the write lock.
+                            // The write lock should have blocked until that requeue operation
+                            // completed, so just try again.
+                            owner = owner2;
                         }
                     }
                     let mut waiter = self.waiter as *mut Waiter;

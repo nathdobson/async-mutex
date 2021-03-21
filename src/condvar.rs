@@ -31,7 +31,7 @@ impl Condvar {
         mem::forget(guard);
         let waiter = self.futex.waiter(0, 0);
         pin_mut!(waiter);
-        let mut futex_atom = self.futex.load(Relaxed);
+        let mut futex_atom = self.futex.load(RelaxedT);
         loop {
             let atom = futex_atom.inner();
             assert!(atom == 0 || atom == mutex_ptr);
@@ -51,7 +51,7 @@ impl Condvar {
         MutexGuard { mutex }
     }
     pub fn notify<T>(&self, guard: &mut MutexGuard<T>, count: usize) {
-        let mut atom = self.futex.load(Acquire);
+        let mut atom = self.futex.load(AcquireT);
         let mutex = atom.inner();
         if mutex == 0 {
             test_println!("Unused condvar");
@@ -66,7 +66,8 @@ impl Condvar {
         let list = queue.pop_many(count, 0);
         test_println!("Requeueing {:?}", list);
         mem::drop(queue);
-        guard.mutex.futex.requeue( list);
+        let mut mutex_waiters = guard.mutex.futex.lock();
+        unsafe { mutex_waiters.requeue(list) };
     }
     pub fn notify_all<T>(&self, guard: &mut MutexGuard<T>) {
         self.notify(guard, usize::MAX);

@@ -70,7 +70,7 @@ impl<T> RwLock<T> {
         test_println!("Read locking");
         let waiter = self.futex.waiter(0, READ_QUEUE);
         pin_mut!(waiter);
-        let mut futex_atom = self.futex.load(Relaxed);
+        let mut futex_atom = self.futex.load(RelaxedT);
         loop {
             let atom = futex_atom.inner();
             if atom.writers == 0 {
@@ -103,7 +103,7 @@ impl<T> RwLock<T> {
         test_println!("Write locking");
         let waiter = self.futex.waiter(0, WRITE_QUEUE);
         pin_mut!(waiter);
-        let mut futex_atom = self.futex.load(Relaxed);
+        let mut futex_atom = self.futex.load(RelaxedT);
         loop {
             let atom = futex_atom.inner();
             if atom == (Atom { readers: 0, writers: 0 }) {
@@ -139,7 +139,7 @@ impl<T> RwLock<T> {
 
     pub(crate) unsafe fn read_unlock(&self) {
         test_println!("Read unlocking");
-        let mut futex_atom = self.futex.load(Relaxed);
+        let mut futex_atom = self.futex.load(RelaxedT);
         loop {
             let atom = futex_atom.inner();
             if atom.readers == 1 && atom.writers > 0 {
@@ -177,7 +177,7 @@ impl<T> RwLock<T> {
         test_println!("Write unlocking");
         let mut waiters = self.futex.lock();
         let mut queue = waiters.lock();
-        let mut futex_atom = self.futex.load(Relaxed);
+        let mut futex_atom = self.futex.load(RelaxedT);
         let has_readers = !queue.is_empty(READ_QUEUE);
         loop {
             let atom = futex_atom.inner();
@@ -202,7 +202,7 @@ impl<T> RwLock<T> {
                     assert!(queue.pop(WRITE_QUEUE).is_none());
                     let mut readers = queue.pop_many(usize::MAX, READ_QUEUE);
                     mem::drop(queue);
-                    let count: usize = (&mut readers).into_iter().count();
+                    let count: usize = (&readers).into_iter().count();
                     loop {
                         let atom = futex_atom.inner();
                         if self.futex.cmpxchg_weak(

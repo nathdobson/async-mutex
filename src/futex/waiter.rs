@@ -14,16 +14,10 @@ use std::process::abort;
 use std::marker::PhantomData;
 use std::ops::Deref;
 
-#[derive(Debug, Eq, PartialEq)]
-pub(in crate::futex) struct FutexOwner {
-    pub first: *const RawFutex,
-    pub second: *const RawFutex,
-}
-
 pub struct Waiter {
     next: UnsafeCell<*const Waiter>,
     prev: UnsafeCell<*const Waiter>,
-    futex: Atomic<FutexOwner>,
+    futex: Atomic<*const RawFutex>,
     queue: UnsafeCell<usize>,
     waker: Atomic<WaiterWaker>,
     message: usize,
@@ -34,24 +28,28 @@ pub(in crate::futex) struct WaiterList {
     pub tail: *const Waiter,
 }
 
+/// A handle for a `Waiter` removed from a queue with the
+/// ability to either `wake` or `requeue`.
 #[must_use = "To avoid deadlock, wake or requeue."]
-pub struct WaiterHandle<'waiters>(&'waiters mut Waiter);
+pub struct WaiterHandle<'waiters>(&'waiters Waiter);
 
 #[must_use = "To avoid deadlock, wake or requeue."]
 #[derive(Debug)]
+/// A handle for a list of `Waiter`s removed from a queue with the
+/// ability to either `wake` or `requeue`.
 pub struct WaiterHandleList<'waiters> {
     pub(in crate::futex) raw: WaiterList,
-    phantom: PhantomData<&'waiters mut Waiter>,
+    phantom: PhantomData<&'waiters Waiter>,
 }
 
-pub struct WaiterHandleIterMut<'a> {
+pub struct WaiterHandleIter<'a> {
     pub(in crate::futex) raw: WaiterList,
-    phantom: PhantomData<&'a mut Waiter>,
+    phantom: PhantomData<&'a Waiter>,
 }
 
 pub struct WaiterHandleIntoIter<'waiters> {
     pub(in crate::futex) raw: WaiterList,
-    phantom: PhantomData<&'waiters mut Waiter>,
+    phantom: PhantomData<&'waiters Waiter>,
 }
 
 impl Waiter {
@@ -59,7 +57,7 @@ impl Waiter {
         Waiter {
             next: UnsafeCell::new(null()),
             prev: UnsafeCell::new(null()),
-            futex: Atomic::new(FutexOwner { first: null(), second: &futex.raw }),
+            futex: Atomic::new(& futex.raw ),
             queue: UnsafeCell::new(queue),
             waker: Atomic::new(WaiterWaker::None),
             message,
@@ -71,10 +69,10 @@ impl Waiter {
     pub(in crate::futex) unsafe fn waker_mut<'a>(self: &'a mut *mut Self) -> &'a mut Atomic<WaiterWaker> {
         &mut (**self).waker
     }
-    pub(in crate::futex) unsafe fn futex<'a>(self: &'a *const Self) -> &'a Atomic<FutexOwner> {
+    pub(in crate::futex) unsafe fn futex<'a>(self: &'a *const Self) -> &'a Atomic<*const RawFutex> {
         &(**self).futex
     }
-    pub(in crate::futex) unsafe fn futex_mut<'a>(self: &'a mut *mut Self) -> &'a mut Atomic<FutexOwner> {
+    pub(in crate::futex) unsafe fn futex_mut<'a>(self: &'a mut *mut Self) -> &'a mut Atomic<*const RawFutex> {
         &mut (**self).futex
     }
     pub(in crate::futex) unsafe fn message_raw(self: *const Self) -> usize {
@@ -112,7 +110,6 @@ impl Waiter {
     pub fn message(&self) -> usize {
         self.message
     }
-
 }
 
 impl<'a> WaiterHandle<'a> {
@@ -258,6 +255,9 @@ impl<'waiters> WaiterHandleList<'waiters> {
 }
 
 impl<'waiters> WaiterHandle<'waiters> {
+    // Wake the associated `Waiter`, causing the associated call to `cmpxchg_wait_weak` to unblock.
+    // This operation "synchronizes-with" the unblocking of `cmpxchg_wait_weak` in both directions.
+    // This operation does not participate in the modification order of the `Futex`.
     pub fn wake(self) {
         unsafe {
             let ptr = self.0 as *const Waiter;
@@ -313,8 +313,8 @@ impl Debug for WaiterList {
     }
 }
 
-impl<'a> Iterator for WaiterHandleIterMut<'a> {
-    type Item = &'a mut Waiter;
+impl<'a> Iterator for WaiterHandleIter<'a> {
+    type Item = &'a Waiter;
 
     fn next(&mut self) -> Option<Self::Item> {
         unsafe {
@@ -342,11 +342,11 @@ impl<'waiters> Iterator for WaiterHandleIntoIter<'waiters> {
     }
 }
 
-impl<'a, 'waiters> IntoIterator for &'a mut WaiterHandleList<'waiters> {
-    type Item = &'a mut Waiter;
-    type IntoIter = WaiterHandleIterMut<'a>;
+impl<'a, 'waiters> IntoIterator for &'a WaiterHandleList<'waiters> {
+    type Item = &'a Waiter;
+    type IntoIter = WaiterHandleIter<'a>;
     fn into_iter(self) -> Self::IntoIter {
-        WaiterHandleIterMut { raw: self.raw, phantom: PhantomData }
+        WaiterHandleIter { raw: self.raw, phantom: PhantomData }
     }
 }
 
@@ -357,18 +357,6 @@ impl<'waiters> IntoIterator for WaiterHandleList<'waiters> {
     fn into_iter(self) -> Self::IntoIter {
         WaiterHandleIntoIter { raw: self.raw, phantom: PhantomData }
     }
-}
-
-impl Copy for FutexOwner {}
-
-impl Clone for FutexOwner {
-    fn clone(&self) -> Self { *self }
-}
-
-impl Packable for FutexOwner {
-    type Raw = usize2;
-    unsafe fn encode(val: Self) -> Self::Raw { mem::transmute(val) }
-    unsafe fn decode(val: Self::Raw) -> Self { mem::transmute(val) }
 }
 
 impl Copy for WaiterList {}

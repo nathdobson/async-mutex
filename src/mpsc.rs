@@ -83,7 +83,7 @@ impl<T> Inner<T> {
         let msg_ptr = &msg as *const Message<T> as usize;
         let waiter = self.send_queue.waiter(msg_ptr, 0);
         pin_mut!(waiter);
-        let mut futex_atom = self.send_queue.load(Relaxed);
+        let mut futex_atom = self.send_queue.load(RelaxedT);
         loop {
             let atom = futex_atom.inner();
             if atom.size < cap {
@@ -149,7 +149,7 @@ impl<T> Inner<T> {
 
             let mut waiter = queue.pop(0);
             if waiter.is_some() {
-                let mut futex_atom = self.send_queue.load(Relaxed);
+                let mut futex_atom = self.send_queue.load(RelaxedT);
                 loop {
                     let atom = futex_atom.inner();
                     assert_eq!(atom.size, self.buckets.len());
@@ -161,7 +161,7 @@ impl<T> Inner<T> {
                     }
                 }
             } else {
-                let mut futex_atom = self.send_queue.load(Relaxed);
+                let mut futex_atom = self.send_queue.load(RelaxedT);
                 loop {
                     let atom = futex_atom.inner();
                     if futex_atom.has_new_waiters() {

@@ -55,7 +55,7 @@ impl<T> Mutex<T> {
     }
 
     pub async fn lock<'a>(&'a self) -> MutexGuard<'a, T> {
-        let mut futex_atom = self.futex.load(Relaxed);
+        let mut futex_atom = self.futex.load(RelaxedT);
         let waiter = self.futex.waiter(0, 0);
         pin_mut!(waiter);
         loop {
@@ -115,7 +115,7 @@ impl<T> Mutex<T> {
     }
 
     pub fn unlock<'a>(&'a self) {
-        let mut futex_atom = self.futex.load(Relaxed);
+        let mut futex_atom = self.futex.load(RelaxedT);
         loop {
             let atom = futex_atom.inner();
             if atom.waking || atom.waiters == 0 {

@@ -51,7 +51,7 @@ impl<T> Mutex<T> {
     pub async fn lock<'a>(&'a self) -> MutexGuard<'a, T> {
         let waiter = self.futex.waiter(0, 0);
         pin_mut!(waiter);
-        let mut futex_atom = self.futex.load(Relaxed);
+        let mut futex_atom = self.futex.load(RelaxedT);
         loop {
             if futex_atom.inner() == 0 {
                 if self.futex.cmpxchg_weak(&mut futex_atom, 1, AcquireT, RelaxedT) {
@@ -84,7 +84,7 @@ impl<T> Mutex<T> {
             waiter.wake();
             return;
         }
-        let mut atom = self.futex.load(Relaxed);
+        let mut atom = self.futex.load(RelaxedT);
         loop {
             if atom.has_new_waiters() {
                 if queue.cmpxchg_enqueue_weak(&mut atom, 1usize, AcquireT, RelaxedT) {

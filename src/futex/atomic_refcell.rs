@@ -46,29 +46,3 @@ impl<'a, T> DerefMut for RefMut<'a, T> {
         unsafe { &mut *self.cell.inner.with_mut(|x| x) }
     }
 }
-//
-// #[cfg(test)]
-// mod test {
-//     use test::Bencher;
-//     use crate::sync::atomic::AtomicBool;
-//     use std::hint::black_box;
-//     use crate::sync::atomic::Ordering::Release;
-//     use crate::sync::atomic::Ordering::Acquire;
-//     use crate::sync::atomic::Ordering::Relaxed;
-//     use crate::futex::Atomic;
-//
-//     #[bench]
-//     fn flip_bool(bencher: &mut Bencher) {
-//         let x = Atomic::<usize>::new(0);
-//         let mut foo = 0;
-//         bencher.iter(|| {
-//             let mut b: usize = 0;
-//             if x.cmpxchg(&mut b, 1, Acquire, Relaxed) {
-//                 foo = black_box(foo);
-//                 x.store(1, Release);
-//             }
-//             foo = black_box(foo);
-//         });
-//         println!("{:?}", foo);
-//     }
-// }
