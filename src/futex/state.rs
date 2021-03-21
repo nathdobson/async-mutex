@@ -1,17 +1,13 @@
 use std::task::{RawWakerVTable, Waker};
 use crate::futex::waiter::Waiter;
 use std::{mem, ptr, fmt};
-use crate::futex::atomic::Packable;
-use crate::futex::atomic_impl::{AtomicUsize2, usize2};
+use crate::atomic::{Packable, CopyWaker, PANIC_WAKER_VTABLE};
+use crate::atomic::{AtomicUsize2, usize2};
 use std::ptr::null;
 use std::mem::align_of;
 use std::fmt::{Debug, Formatter};
 use crate::sync::atomic::AtomicUsize;
 use std::marker::PhantomData;
-
-/// A `CopyWaker` Similar to `RawWaker`, but it implements `Copy` and uses a pointer to a `RawWakerVTable`.
-#[derive(Copy, Clone, Debug, Eq, PartialOrd, PartialEq, Ord)]
-pub struct CopyWaker(pub *const (), pub *const RawWakerVTable);
 
 #[derive(Copy, Clone, Debug, Eq, PartialOrd, PartialEq, Ord)]
 pub(in crate::futex) enum WaiterWaker {
@@ -20,19 +16,19 @@ pub(in crate::futex) enum WaiterWaker {
     Done,
 }
 
+/// A snapshot of the atomic state of a futex (both user-supplied and private).
 #[derive(Eq, Ord, PartialOrd, PartialEq)]
-pub struct FutexAtom {
+pub(in crate::futex) struct RawFutexAtom {
     pub(in crate::futex) atom: usize,
     pub(in crate::futex) inbox: *const Waiter,
 }
 
-impl CopyWaker {
-    pub unsafe fn from_waker(x: Waker) -> Self { mem::transmute(x) }
-    pub unsafe fn into_waker(self) -> Waker { mem::transmute(self) }
+#[derive(Eq, Ord, PartialOrd, PartialEq)]
+pub struct FutexAtom<A: Packable<Raw=usize>> {
+    pub(in crate::futex) raw: RawFutexAtom,
+    pub(in crate::futex) phantom: PhantomData<A>,
 }
 
-/// It is possible to reserve a value of type `*const RawWakerVTable` by creating a static with value `PANIC_WAKER_VTABLE`.
-pub const PANIC_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(|_| panic!(), |_| panic!(), |_| panic!(), |_| panic!());
 static WAITER_NONE_TAG: RawWakerVTable = PANIC_WAKER_VTABLE;
 static WAITER_DONE_TAG: RawWakerVTable = PANIC_WAKER_VTABLE;
 
@@ -58,9 +54,9 @@ impl Packable for WaiterWaker {
     }
 }
 
-impl FutexAtom {
+impl RawFutexAtom {
     pub(crate) fn debug<A: Packable<Raw=usize> + Debug>(self) -> impl Debug {
-        struct Result<A>(FutexAtom, PhantomData<A>);
+        struct Result<A>(RawFutexAtom, PhantomData<A>);
         impl<A: Packable<Raw=usize> + Debug> Debug for Result<A> {
             fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
                 unsafe {
@@ -73,18 +69,20 @@ impl FutexAtom {
         }
         Result::<A>(self, PhantomData)
     }
+}
+
+impl<A: Packable<Raw=usize>> FutexAtom<A> {
     pub fn has_new_waiters(&self) -> bool {
-        self.inbox != null()
+        self.raw.inbox != null()
     }
-    pub unsafe fn inner<A: Packable<Raw=usize>>(&self) -> A {
-        A::decode(self.atom)
-    }
-    pub unsafe fn set_inner<A: Packable<Raw=usize>>(&mut self, new: A) {
-        self.atom = A::encode(new);
+    pub fn inner(&self) -> A {
+        unsafe {
+            A::decode(self.raw.atom)
+        }
     }
 }
 
-impl Packable for FutexAtom {
+impl Packable for RawFutexAtom {
     // type Impl = AtomicUsize2;
     type Raw = usize2;
     unsafe fn encode(val: Self) -> usize2 {
@@ -96,13 +94,13 @@ impl Packable for FutexAtom {
     }
 }
 
-impl Copy for FutexAtom {}
+impl Copy for RawFutexAtom {}
 
-impl Clone for FutexAtom {
+impl Clone for RawFutexAtom {
     fn clone(&self) -> Self { *self }
 }
 
-impl Debug for FutexAtom {
+impl Debug for RawFutexAtom {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("FutexAtom")
             .field("atom", &self.atom)
@@ -119,9 +117,9 @@ pub fn test_packable<T: Packable + Eq + Debug>(x: T) {
 
 #[cfg(test)]
 mod test {
-    use crate::futex::atomic::Packable;
+    use crate::atomic::Packable;
     use std::fmt::Debug;
-    use crate::futex::state::{WaiterWaker, PANIC_WAKER_VTABLE, CopyWaker, FutexAtom, test_packable};
+    use crate::futex::state::{WaiterWaker, PANIC_WAKER_VTABLE, CopyWaker, RawFutexAtom, test_packable};
     use std::task::RawWakerVTable;
     use crate::futex::waiter::{Waiter, WaiterList};
     use std::mem::MaybeUninit;
@@ -145,6 +143,6 @@ mod test {
     #[test]
     fn test_futex_atom() {
         let waiter: MaybeUninit<Waiter> = MaybeUninit::uninit();
-        test_packable(FutexAtom { atom: 123, inbox: waiter.as_ptr() });
+        test_packable(RawFutexAtom { atom: 123, inbox: waiter.as_ptr() });
     }
 }

@@ -12,11 +12,12 @@ use std::ptr::{null, null_mut};
 use std::sync::Weak;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable};
 use std::task::Waker;
+use pin_utils::pin_mut;
 
-use crate::futex::{Atomic, Packable};
-use crate::futex::{AtomicUsize2, usize2, usize_half};
+use crate::atomic::{Atomic, Packable, AcquireT, RelaxedT, ReleaseT, AcqRelT};
+use crate::atomic::{AtomicUsize2, usize2, usize_half};
 use crate::cell::UnsafeCell;
-use crate::futex::{Futex, WaitFuture, WaitAction, Flow};
+use crate::futex::{Futex};
 use crate::future::Future;
 use crate::sync::Arc;
 use crate::sync::atomic::AtomicBool;
@@ -28,7 +29,7 @@ use crate::futex::Waiter;
 
 #[derive(Debug)]
 pub struct RwLock<T> {
-    pub(crate) futex: Futex,
+    pub(crate) futex: Futex<Atom>,
     inner: UnsafeCell<T>,
 }
 
@@ -66,53 +67,70 @@ impl<T> RwLock<T> {
     }
 
     pub async fn read<'a>(&'a self) -> ReadGuard<'a, T> {
-        unsafe {
-            test_println!("Read locking");
-            self.futex.wait(
-                0,
-                READ_QUEUE,
-                |atom: Atom| {
-                    if atom.writers > 0 {
-                        WaitAction { update: None, flow: Flow::Pending(()) }
-                    } else {
-                        WaitAction {
-                            update: Some(Atom { readers: atom.readers + 1, ..atom }),
-                            flow: Flow::Ready(()),
-                        }
-                    }
-                },
-                |_| test_println!("Read waiting"),
-                |_| self.read_unlock(),
-                |_| (),
-            ).await;
-            test_println!("Read locked");
-            ReadGuard { mutex: self }
+        test_println!("Read locking");
+        let waiter = self.futex.waiter(0, READ_QUEUE);
+        pin_mut!(waiter);
+        let mut futex_atom = self.futex.load(Relaxed);
+        loop {
+            let atom = futex_atom.inner();
+            if atom.writers == 0 {
+                if self.futex.cmpxchg_weak(
+                    &mut futex_atom,
+                    Atom { readers: atom.readers + 1, writers: 0 },
+                    AcquireT, RelaxedT) {
+                    break;
+                }
+            } else {
+                if self.futex.cmpxchg_wait_weak(
+                    waiter.as_mut(),
+                    &mut futex_atom,
+                    atom,
+                    ReleaseT,
+                    RelaxedT,
+                    || {},
+                    || unsafe { self.read_unlock() },
+                    || {},
+                ).await {
+                    break;
+                }
+            }
         }
+        test_println!("Read locked");
+        ReadGuard { mutex: self }
     }
 
     pub async fn write<'a>(&'a self) -> WriteGuard<'a, T> {
-        unsafe {
-            test_println!("Write locking");
-            self.futex.wait(
-                0,
-                WRITE_QUEUE,
-                |atom: Atom| {
-                    WaitAction {
-                        update: Some(Atom { writers: atom.writers + 1, ..atom }),
-                        flow: if atom == (Atom { readers: 0, writers: 0 }) {
-                            Flow::Ready(())
-                        } else {
-                            Flow::Pending(())
-                        },
-                    }
-                },
-                |_| test_println!("Write waiting"),
-                |_| self.write_unlock(),
-                |_| self.write_abort(),
-            ).await;
-            test_println!("Write locked");
-            WriteGuard { mutex: self }
+        test_println!("Write locking");
+        let waiter = self.futex.waiter(0, WRITE_QUEUE);
+        pin_mut!(waiter);
+        let mut futex_atom = self.futex.load(Relaxed);
+        loop {
+            let atom = futex_atom.inner();
+            if atom == (Atom { readers: 0, writers: 0 }) {
+                if self.futex.cmpxchg_weak(
+                    &mut futex_atom,
+                    Atom { readers: 0, writers: 1 },
+                    AcquireT, RelaxedT,
+                ) {
+                    break;
+                }
+            } else {
+                if self.futex.cmpxchg_wait_weak(
+                    waiter.as_mut(),
+                    &mut futex_atom,
+                    Atom { writers: atom.writers + 1, ..atom },
+                    ReleaseT,
+                    RelaxedT,
+                    || test_println!("Write waiting"),
+                    || unsafe { self.write_unlock() },
+                    || unsafe { self.write_abort() },
+                ).await {
+                    break;
+                }
+            }
         }
+        test_println!("Write locked");
+        WriteGuard { mutex: self }
     }
 
     pub(crate) unsafe fn write_abort(&self) {
@@ -123,14 +141,14 @@ impl<T> RwLock<T> {
         test_println!("Read unlocking");
         let mut futex_atom = self.futex.load(Relaxed);
         loop {
-            let atom = futex_atom.inner::<Atom>();
+            let atom = futex_atom.inner();
             if atom.readers == 1 && atom.writers > 0 {
                 break;
             } else {
                 if self.futex.cmpxchg_weak(
                     &mut futex_atom,
                     Atom { readers: atom.readers - 1, ..atom },
-                    Release, Relaxed) {
+                    ReleaseT, RelaxedT) {
                     return;
                 }
             }
@@ -139,8 +157,8 @@ impl<T> RwLock<T> {
         let mut queue = waiters.lock();
         let writers: usize;
         loop {
-            let atom = futex_atom.inner::<Atom>();
-            if queue.cmpxchg_enqueue_weak(&mut futex_atom, Atom { readers: 0, ..atom }, AcqRel, Relaxed) {
+            let atom = futex_atom.inner();
+            if queue.cmpxchg_enqueue_weak(&mut futex_atom, Atom { readers: 0, ..atom }, AcqRelT, RelaxedT) {
                 writers = atom.writers;
                 break;
             }
@@ -160,16 +178,16 @@ impl<T> RwLock<T> {
         let mut waiters = self.futex.lock();
         let mut queue = waiters.lock();
         let mut futex_atom = self.futex.load(Relaxed);
-        let has_readers=!queue.is_empty(READ_QUEUE);
+        let has_readers = !queue.is_empty(READ_QUEUE);
         loop {
-            let atom = futex_atom.inner::<Atom>();
+            let atom = futex_atom.inner();
             assert_eq!(atom.readers, 0);
             if atom.writers == 1 && !has_readers && !futex_atom.has_new_waiters() {
                 mem::drop(queue);
                 if self.futex.cmpxchg_weak(
                     &mut futex_atom,
                     Atom { writers: 0, readers: 0 },
-                    Release, Relaxed) {
+                    ReleaseT, RelaxedT) {
                     test_println!("Write unlocked no waiters");
                     return;
                 } else {
@@ -180,18 +198,17 @@ impl<T> RwLock<T> {
                 if queue.cmpxchg_enqueue_weak(
                     &mut futex_atom,
                     Atom { writers: 0, readers: 1 },
-                    AcqRel, Relaxed) {
+                    AcqRelT, RelaxedT) {
                     assert!(queue.pop(WRITE_QUEUE).is_none());
-                    let readers = queue.pop_many(usize::MAX, READ_QUEUE);
+                    let mut readers = queue.pop_many(usize::MAX, READ_QUEUE);
                     mem::drop(queue);
-                    let count = readers.count();
-                    futex_atom.set_inner(Atom { writers: 0, readers: 1 });
+                    let count: usize = (&mut readers).into_iter().count();
                     loop {
-                        let atom = futex_atom.inner::<Atom>();
+                        let atom = futex_atom.inner();
                         if self.futex.cmpxchg_weak(
                             &mut futex_atom,
                             Atom { readers: atom.readers + count - 1, ..atom },
-                            Relaxed, Relaxed) {
+                            RelaxedT, RelaxedT) {
                             break;
                         }
                     }
@@ -205,7 +222,7 @@ impl<T> RwLock<T> {
                 if queue.cmpxchg_enqueue_weak(
                     &mut futex_atom,
                     Atom { writers: atom.writers - 1, ..atom },
-                    AcqRel, Relaxed) {
+                    AcqRelT, RelaxedT) {
                     assert!(atom.writers > 1);
                     let writer = queue.pop(WRITE_QUEUE).unwrap();
                     mem::drop(queue);

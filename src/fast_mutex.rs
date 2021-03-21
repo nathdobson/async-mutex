@@ -12,6 +12,7 @@ use std::ptr::{null, null_mut};
 use std::sync::Weak;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable};
 use std::task::Waker;
+use pin_utils::pin_mut;
 
 use crate::cell::UnsafeCell;
 use crate::future::Future;
@@ -20,11 +21,12 @@ use crate::sync::atomic::AtomicBool;
 use crate::sync::atomic::AtomicUsize;
 use crate::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use crate::util::{AsyncFnOnce, Bind, FnOnceExt};
-use crate::futex::{Futex, WaitAction, Packable, Flow, usize_half, Atomic};
+use crate::futex::{Futex};
+use crate::atomic::{Packable, AcquireT, RelaxedT, ReleaseT, AcqRelT};
 
 #[derive(Debug)]
 pub struct Mutex<T> {
-    futex: Futex,
+    futex: Futex<Atom>,
     inner: UnsafeCell<T>,
 }
 
@@ -53,122 +55,118 @@ impl<T> Mutex<T> {
     }
 
     pub async fn lock<'a>(&'a self) -> MutexGuard<'a, T> {
-        unsafe {
-            if let Flow::Ready(_) = self.futex.wait(
-                0,
-                0,
-                |atom: Atom| {
-                    if !atom.locked {
-                        WaitAction {
-                            update: Some(Atom { locked: true, ..atom }),
-                            flow: Flow::Ready(()),
-                        }
-                    } else {
-                        WaitAction {
-                            update: Some(Atom {
-                                waiters: atom.waiters.checked_add(1).unwrap(),
-                                ..atom
-                            }),
-                            flow: Flow::Pending(()),
-                        }
-                    }
-                },
-                |_| (),
-                |_| todo!(),
-                |_| todo!(),
-            ).await {
-                return MutexGuard { mutex: self };
-            }
-            loop {
-                if let Flow::Ready(_) = self.futex.wait(
-                    0,
-                    0,
-                    |atom: Atom| {
-                        if !atom.locked {
-                            WaitAction {
-                                update: Some(Atom {
-                                    locked: true,
-                                    waiters: atom.waiters - 1,
-                                    waking: false,
-                                }),
-                                flow: Flow::Ready(()),
-                            }
-                        } else {
-                            WaitAction {
-                                update: Some(Atom {
-                                    waking: false,
-                                    ..atom
-                                }),
-                                flow: Flow::Pending(()),
-                            }
-                        }
-                    },
-                    |_| (),
-                    |_| todo!(),
-                    |_| todo!(),
+        let mut futex_atom = self.futex.load(Relaxed);
+        let waiter = self.futex.waiter(0, 0);
+        pin_mut!(waiter);
+        loop {
+            let atom = futex_atom.inner();
+            if atom.locked {
+                if self.futex.cmpxchg_wait_weak(
+                    waiter.as_mut(),
+                    &mut futex_atom,
+                    Atom { waiters: atom.waiters.checked_add(1).unwrap(), ..atom },
+                    ReleaseT,
+                    RelaxedT,
+                    || {},
+                    || todo!(),
+                    || todo!(),
                 ).await {
+                    break;
+                }
+            } else {
+                if self.futex.cmpxchg_weak(
+                    &mut futex_atom,
+                    Atom { locked: true, ..atom },
+                    AcquireT, RelaxedT,
+                ) {
                     return MutexGuard { mutex: self };
+                }
+            }
+        }
+        loop {
+            let waiter = self.futex.waiter(0, 0);
+            pin_mut!(waiter);
+            loop {
+                let atom = futex_atom.inner();
+                if atom.locked {
+                    if self.futex.cmpxchg_wait_weak(
+                        waiter.as_mut(),
+                        &mut futex_atom,
+                        Atom { waking: false, ..atom },
+                        ReleaseT,
+                        RelaxedT,
+                        || {},
+                        || todo!(),
+                        || todo!(),
+                    ).await {
+                        break;
+                    }
+                } else {
+                    if self.futex.cmpxchg_weak(
+                        &mut futex_atom,
+                        Atom { locked: true, waiters: atom.waiters - 1, waking: false },
+                        AcquireT, RelaxedT,
+                    ) {
+                        return MutexGuard { mutex: self };
+                    }
                 }
             }
         }
     }
 
     pub fn unlock<'a>(&'a self) {
-        unsafe {
-            let mut futex_atom = self.futex.load(Relaxed);
-            loop {
-                let atom = futex_atom.inner::<Atom>();
-                if atom.waking || atom.waiters == 0 {
-                    if self.futex.cmpxchg_weak(
-                        &mut futex_atom,
-                        Atom { locked: false, ..atom },
-                        Release, Relaxed) {
-                        return;
-                    }
-                } else if atom.waking {
+        let mut futex_atom = self.futex.load(Relaxed);
+        loop {
+            let atom = futex_atom.inner();
+            if atom.waking || atom.waiters == 0 {
+                if self.futex.cmpxchg_weak(
+                    &mut futex_atom,
+                    Atom { locked: false, ..atom },
+                    ReleaseT, RelaxedT) {
                     return;
-                } else {
+                }
+            } else if atom.waking {
+                return;
+            } else {
+                break;
+            }
+        }
+        let mut waiters = self.futex.lock();
+        let mut queue = waiters.lock();
+        let had_waiters = !queue.is_empty(0);
+        let mut atom;
+        loop {
+            atom = futex_atom.inner();
+            if had_waiters {
+                if self.futex.cmpxchg_weak(
+                    &mut futex_atom,
+                    Atom { locked: false, waking: true, ..atom },
+                    ReleaseT, RelaxedT) {
                     break;
                 }
-            }
-            let mut waiters = self.futex.lock();
-            let mut queue = waiters.lock();
-            let had_waiters = !queue.is_empty(0);
-            let mut atom;
-            loop {
-                atom = futex_atom.inner::<Atom>();
-                if had_waiters {
-                    if self.futex.cmpxchg_weak(
-                        &mut futex_atom,
-                        Atom { locked: false, waking: true, ..atom },
-                        Release, Relaxed) {
-
-                        break;
-                    }
-                } else if futex_atom.has_new_waiters() {
-                    if queue.cmpxchg_enqueue_weak(
-                        &mut futex_atom,
-                        Atom { locked: false, waking: true, ..atom },
-                        AcqRel, Relaxed,
-                    ) {
-                        break;
-                    }
-                } else {
-                    assert_eq!(atom.waiters, 0);
-                    if self.futex.cmpxchg_weak(
-                        &mut futex_atom,
-                        Atom { locked: false, waking: false, waiters: 0 },
-                        Release, Relaxed,
-                    ) {
-                        return;
-                    }
+            } else if futex_atom.has_new_waiters() {
+                if queue.cmpxchg_enqueue_weak(
+                    &mut futex_atom,
+                    Atom { locked: false, waking: true, ..atom },
+                    AcqRelT, RelaxedT,
+                ) {
+                    break;
+                }
+            } else {
+                assert_eq!(atom.waiters, 0);
+                if self.futex.cmpxchg_weak(
+                    &mut futex_atom,
+                    Atom { locked: false, waking: false, waiters: 0 },
+                    ReleaseT, RelaxedT,
+                ) {
+                    return;
                 }
             }
-            if !atom.waking {
-                let waiter = queue.pop(0).unwrap();
-                mem::drop(queue);
-                waiter.wake();
-            }
+        }
+        if !atom.waking {
+            let waiter = queue.pop(0).unwrap();
+            mem::drop(queue);
+            waiter.wake();
         }
     }
 }

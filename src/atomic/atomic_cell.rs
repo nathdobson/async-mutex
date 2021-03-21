@@ -1,15 +1,16 @@
 use crate::sync::atomic::{Ordering, AtomicUsize, AtomicBool};
 use std::marker::PhantomData;
 use std::{mem, fmt};
-use crate::futex::atomic_impl::{HasAtomic, IsAtomic};
+use crate::atomic::{HasAtomic, IsAtomic};
 use std::fmt::{Debug, Formatter};
 use crate::sync::atomic::Ordering::Relaxed;
+use std::task::{RawWakerVTable, Waker};
 
 /// An Atomic container for a bitpacked `T`, implemented using native atomics.
 pub struct Atomic<T>(<T::Raw as HasAtomic>::Impl, PhantomData<T>) where T: Packable, T::Raw: HasAtomic;
 
 /// Specify how to bitpack a value (typically into an unsigned integer type).
-pub trait Packable: Sized + Copy {
+pub trait Packable: Sized + Copy + Debug {
     type Raw;
     unsafe fn encode(val: Self) -> Self::Raw;
     unsafe fn decode(val: Self::Raw) -> Self;
@@ -96,3 +97,12 @@ impl Packable for u8 {
     unsafe fn encode(val: Self) -> Self::Raw { val }
     unsafe fn decode(val: Self::Raw) -> Self { val }
 }
+
+/// A `CopyWaker` Similar to `RawWaker`, but it implements `Copy` and uses a pointer to a `RawWakerVTable`.
+#[derive(Copy, Clone, Debug, Eq, PartialOrd, PartialEq, Ord)]
+pub struct CopyWaker(pub *const (), pub *const RawWakerVTable);
+impl CopyWaker {
+    pub unsafe fn from_waker(x: Waker) -> Self { mem::transmute(x) }
+    pub unsafe fn into_waker(self) -> Waker { mem::transmute(self) }
+}
+pub const PANIC_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(|_| panic!(), |_| panic!(), |_| panic!(), |_| panic!());

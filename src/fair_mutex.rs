@@ -12,11 +12,11 @@ use std::ptr::{null, null_mut};
 use std::sync::Weak;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable};
 use std::task::Waker;
+use pin_utils::pin_mut;
 
-use crate::futex::{Atomic, Packable, FutexWaitersGuard, FutexQueueGuard};
-use crate::futex::{AtomicUsize2, usize2};
+use crate::futex::{FutexWaitersGuard, FutexQueueGuard, Waiter};
 use crate::cell::UnsafeCell;
-use crate::futex::{Futex, WaitFuture, WaitAction, Flow};
+use crate::futex::{Futex};
 use crate::future::Future;
 use crate::sync::Arc;
 use crate::sync::atomic::AtomicBool;
@@ -24,14 +24,13 @@ use crate::sync::atomic::AtomicUsize;
 use crate::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 //use crate::test_println;
 use crate::util::{AsyncFnOnce, Bind, FnOnceExt};
-use crate::futex::Waiter;
 use core::time::Duration;
 use crate::sync::atomic::Ordering::SeqCst;
-use crate::futex::FutexAtom;
+use crate::atomic::{RelaxedT, AcquireT, ReleaseT};
 
 #[derive(Debug)]
 pub struct Mutex<T> {
-    pub(crate) futex: Futex,
+    pub(crate) futex: Futex<usize>,
     inner: UnsafeCell<T>,
 }
 
@@ -50,23 +49,30 @@ impl<T> Mutex<T> {
     }
 
     pub async fn lock<'a>(&'a self) -> MutexGuard<'a, T> {
-        unsafe {
-            self.futex.wait(
-                0,
-                0,
-                |locked: usize| {
-                    if locked == 0 {
-                        WaitAction { update: Some(1), flow: Flow::Ready(()) }
-                    } else {
-                        WaitAction { update: None, flow: Flow::Pending(()) }
-                    }
-                },
-                |_| (),
-                |_| self.unlock(),
-                |_| (),
-            ).await;
-            MutexGuard { mutex: self }
+        let waiter = self.futex.waiter(0, 0);
+        pin_mut!(waiter);
+        let mut futex_atom = self.futex.load(Relaxed);
+        loop {
+            if futex_atom.inner() == 0 {
+                if self.futex.cmpxchg_weak(&mut futex_atom, 1, AcquireT, RelaxedT) {
+                    break;
+                }
+            } else {
+                if self.futex.cmpxchg_wait_weak(
+                    waiter.as_mut(),
+                    &mut futex_atom,
+                    1,
+                    ReleaseT,
+                    RelaxedT,
+                    || (),
+                    || unsafe { self.unlock() },
+                    || (),
+                ).await {
+                    break;
+                }
+            }
         }
+        MutexGuard { mutex: self }
     }
 
     pub(crate) unsafe fn unlock(&self) {
@@ -81,7 +87,7 @@ impl<T> Mutex<T> {
         let mut atom = self.futex.load(Relaxed);
         loop {
             if atom.has_new_waiters() {
-                if queue.cmpxchg_enqueue_weak(&mut atom, 1usize, Acquire, Relaxed) {
+                if queue.cmpxchg_enqueue_weak(&mut atom, 1usize, AcquireT, RelaxedT) {
                     let waiter = queue.pop(0).unwrap();
                     mem::drop(queue);
                     waiter.wake();
@@ -89,7 +95,7 @@ impl<T> Mutex<T> {
                 }
             } else {
                 mem::drop(queue);
-                if self.futex.cmpxchg_weak(&mut atom, 0usize, Release, Relaxed) {
+                if self.futex.cmpxchg_weak(&mut atom, 0usize, ReleaseT, RelaxedT) {
                     return;
                 } else {
                     queue = waiters.lock();

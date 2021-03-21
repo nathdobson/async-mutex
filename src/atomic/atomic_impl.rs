@@ -82,8 +82,6 @@ macro_rules! atomic_impl (
     }
 );
 
-
-
 atomic_impl!(AtomicUsize, usize);
 atomic_impl!(AtomicBool, bool);
 #[cfg(target_has_atomic = "8")]
@@ -97,7 +95,7 @@ atomic_impl!(AtomicU64, u64);
 #[cfg(target_has_atomic = "128")]
 atomic_impl!(AtomicU128, u128);
 
-pub struct PlatformDoesNotSupportDoubleWideCompareAndSwap;
+struct PlatformDoesNotSupportDoubleWideCompareAndSwap;
 
 #[cfg(all(target_pointer_width = "16", target_has_atomic = "32"))]
 pub type AtomicUsize2 = AtomicU32;
@@ -108,27 +106,34 @@ pub type AtomicUsize2 = [PlatformDoesNotSupportDoubleWideCompareAndSwap; 0 - 1];
 #[cfg(all(target_pointer_width = "32", target_has_atomic = "64"))]
 pub type AtomicUsize2 = AtomicU64;
 
+
 #[cfg(all(target_pointer_width = "32", not(target_has_atomic = "64")))]
-pub type AtomicUsize2 = [PlatformDoesNotSupportDoubleWideCompareAndSwap; 0 - 1];
-
+pub type AtomicUsize2Impl = [PlatformDoesNotSupportDoubleWideCompareAndSwap; 0 - 1];
 #[cfg(all(target_pointer_width = "64", target_has_atomic = "128"))]
-pub type AtomicUsize2 = AtomicU128;
-
+type AtomicUsize2Impl = AtomicU128;
 #[cfg(all(target_pointer_width = "64", not(target_has_atomic = "128")))]
-pub type AtomicUsize2 = [PlatformDoesNotSupportDoubleWideCompareAndSwap; 0 - 1];
+pub type AtomicUsize2Impl = [PlatformDoesNotSupportDoubleWideCompareAndSwap; 0 - 1];
 
+/// An atomic twice as large as AtomicUsize.
+/// This typically requires DWCAS (double-wide compare-and-swap).
+pub type AtomicUsize2 = AtomicUsize2Impl;
+
+/// An unsigned integer twice as large as usize.
 #[allow(non_camel_case_types)]
 pub type usize2 = <AtomicUsize2 as IsAtomic>::Raw;
 
 #[allow(non_camel_case_types)]
 #[cfg(all(target_pointer_width = "16"))]
-pub type usize_half = u8;
+type usize_half_impl = u8;
 
 #[allow(non_camel_case_types)]
 #[cfg(all(target_pointer_width = "32"))]
-pub type usize_half = u16;
+type usize_half_impl = u16;
 
 #[allow(non_camel_case_types)]
 #[cfg(all(target_pointer_width = "64"))]
-pub type usize_half = u32;
+type usize_half_impl = u32;
 
+/// An unsigned integer half as large as usize.
+#[allow(non_camel_case_types)]
+pub type usize_half = usize_half_impl;

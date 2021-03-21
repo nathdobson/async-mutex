@@ -1,9 +1,7 @@
 use crate::sync::Arc;
 use crate::cell::UnsafeCell;
-use crate::futex::{Packable, Atomic};
-use crate::futex::{Futex, WaitAction, Flow};
-use crate::futex::{CopyWaker, PANIC_WAKER_VTABLE};
-use crate::futex::{usize2, IsAtomic, usize_half};
+use crate::futex::{Futex};
+use crate::atomic::{CopyWaker, PANIC_WAKER_VTABLE, AcqRelT, RelaxedT, ReleaseT, AcquireT};
 use crate::sync::atomic::AtomicBool;
 use std::marker::PhantomData;
 use crate::sync::atomic::Ordering::AcqRel;
@@ -16,8 +14,10 @@ use std::iter::repeat_with;
 use crate::sync::atomic::Ordering::Relaxed;
 use std::mem;
 use std::ptr::null;
+use pin_utils::pin_mut;
 //use crate::test_println;
 use std::sync::mpsc::{SendError, RecvError};
+use crate::atomic::{Atomic, Packable, usize_half, usize2, IsAtomic};
 
 #[derive(Clone, Debug)]
 pub struct Sender<T>(Arc<Inner<T>>);
@@ -46,7 +46,7 @@ enum RecvState {
 #[derive(Debug)]
 struct Inner<T> {
     buckets: Vec<Bucket<T>>,
-    send_queue: Futex,
+    send_queue: Futex<SendState>,
     recv_state: Atomic<RecvState>,
     recv_head: UnsafeCell<usize>,
 }
@@ -81,36 +81,45 @@ impl<T> Inner<T> {
         let cap = self.buckets.len();
         let mut msg: Message<T> = Message(UnsafeCell::new(Some(msg)));
         let msg_ptr = &msg as *const Message<T> as usize;
-        let selected = self.send_queue.wait(
-            msg_ptr,
-            0,
-            |mut state: SendState| {
-                if state.size < cap {
-                    let selected = state.write_head;
-                    state.write_head = (state.write_head + 1) % cap;
-                    state.size += 1;
-                    WaitAction { update: Some(state), flow: Flow::Ready(selected) }
-                } else {
-                    WaitAction { update: None, flow: Flow::Pending(()) }
+        let waiter = self.send_queue.waiter(msg_ptr, 0);
+        pin_mut!(waiter);
+        let mut futex_atom = self.send_queue.load(Relaxed);
+        loop {
+            let atom = futex_atom.inner();
+            if atom.size < cap {
+                let selected = atom.write_head;
+                if self.send_queue.cmpxchg_weak(
+                    &mut futex_atom,
+                    SendState { write_head: (atom.write_head + 1) % cap, size: atom.size + 1 },
+                    AcqRelT, RelaxedT,
+                ) {
+                    let msg = msg.take();
+                    self.buckets[selected].data.with_mut(|data|
+                        (*data).write(msg)
+                    );
+                    self.buckets[selected].filled.store(true, Release);
+                    match self.recv_state.swap(RecvState::Dirty, AcqRel) {
+                        RecvState::Waiting(waker) => waker.into_waker().wake(),
+                        RecvState::Dirty => {}
+                    }
+                    test_println!("Filled {:?}", &self.buckets[selected] as *const Bucket<T>);
+                    return Ok(());
                 }
-            },
-            |_| (),
-            |_| assert!(msg.is_none()),
-            |_| (),
-        ).await;
-        if let Flow::Ready(selected) = selected {
-            let msg = msg.take();
-            self.buckets[selected].data.with_mut(|data|
-                (*data).write(msg)
-            );
-            self.buckets[selected].filled.store(true, Release);
-            match self.recv_state.swap(RecvState::Dirty, AcqRel) {
-                RecvState::Waiting(waker) => waker.into_waker().wake(),
-                RecvState::Dirty => {}
+            } else {
+                if self.send_queue.cmpxchg_wait_weak(
+                    waiter.as_mut(),
+                    &mut futex_atom,
+                    atom,
+                    ReleaseT,
+                    RelaxedT,
+                    || {},
+                    || assert!(msg.is_none()),
+                    || {},
+                ).await {
+                    return Ok(());
+                }
             }
-            test_println!("Filled {:?}", &self.buckets[selected] as *const Bucket<T>);
         }
-        Ok(())
     }
     pub async unsafe fn recv(&self) -> T {
         poll_fn(|cx| {
@@ -142,25 +151,25 @@ impl<T> Inner<T> {
             if waiter.is_some() {
                 let mut futex_atom = self.send_queue.load(Relaxed);
                 loop {
-                    let atom = futex_atom.inner::<SendState>();
+                    let atom = futex_atom.inner();
                     assert_eq!(atom.size, self.buckets.len());
                     if self.send_queue.cmpxchg_weak(
                         &mut futex_atom,
                         SendState { write_head: (atom.write_head + 1) % self.buckets.len(), size: atom.size },
-                        AcqRel, Relaxed) {
+                        AcqRelT, RelaxedT) {
                         break;
                     }
                 }
             } else {
                 let mut futex_atom = self.send_queue.load(Relaxed);
                 loop {
-                    let atom = futex_atom.inner::<SendState>();
+                    let atom = futex_atom.inner();
                     if futex_atom.has_new_waiters() {
                         assert_eq!(atom.size, self.buckets.len());
                         if queue.cmpxchg_enqueue_weak(
                             &mut futex_atom,
                             SendState { write_head: (atom.write_head + 1) % self.buckets.len(), size: atom.size },
-                            AcqRel, Relaxed,
+                            AcqRelT, RelaxedT,
                         ) {
                             break;
                         }
@@ -168,7 +177,7 @@ impl<T> Inner<T> {
                         if queue.cmpxchg_enqueue_weak(
                             &mut futex_atom,
                             SendState { write_head: atom.write_head, size: atom.size - 1 },
-                            AcqRel, Relaxed) {
+                            AcqRelT, RelaxedT) {
                             break;
                         }
                     }

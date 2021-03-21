@@ -48,6 +48,7 @@ mod condvar;
 mod mpsc;
 mod rwlock;
 pub mod fast_mutex;
+pub mod atomic;
 
 pub use fair_mutex::Mutex;
 pub use fair_mutex::MutexGuard;

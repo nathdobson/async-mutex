@@ -1,21 +1,23 @@
 use crate::cell::UnsafeCell;
-use crate::futex::atomic::{Atomic, Packable};
+use crate::atomic::{Atomic, Packable, IsAcquireT};
 use std::ptr::null;
 use crate::futex::state::WaiterWaker;
-use crate::futex::{Futex, FutexState};
+use crate::futex::{Futex, FutexState, RawFutex};
 use crate::thread::Thread;
 use crate::sync::atomic::Ordering::AcqRel;
 //use crate::test_println;
 use std::fmt::{Debug, Formatter};
 use std::{fmt, mem};
-use crate::futex::atomic_impl::usize2;
+use crate::atomic::usize2;
 use std::mem::MaybeUninit;
 use std::process::abort;
+use std::marker::PhantomData;
+use std::ops::Deref;
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub(in crate::futex) struct FutexOwner {
-    pub first: *const Futex,
-    pub second: *const Futex,
+    pub first: *const RawFutex,
+    pub second: *const RawFutex,
 }
 
 pub struct Waiter {
@@ -27,17 +29,37 @@ pub struct Waiter {
     message: usize,
 }
 
-pub struct WaiterList {
+pub(in crate::futex) struct WaiterList {
     pub head: *const Waiter,
     pub tail: *const Waiter,
 }
 
+#[must_use = "To avoid deadlock, wake or requeue."]
+pub struct WaiterHandle<'waiters>(&'waiters mut Waiter);
+
+#[must_use = "To avoid deadlock, wake or requeue."]
+#[derive(Debug)]
+pub struct WaiterHandleList<'waiters> {
+    pub(in crate::futex) raw: WaiterList,
+    phantom: PhantomData<&'waiters mut Waiter>,
+}
+
+pub struct WaiterHandleIterMut<'a> {
+    pub(in crate::futex) raw: WaiterList,
+    phantom: PhantomData<&'a mut Waiter>,
+}
+
+pub struct WaiterHandleIntoIter<'waiters> {
+    pub(in crate::futex) raw: WaiterList,
+    phantom: PhantomData<&'waiters mut Waiter>,
+}
+
 impl Waiter {
-    pub fn new(message: usize, queue: usize) -> Self {
+    pub(in crate::futex) fn new<A: Packable<Raw=usize>>(futex: &Futex<A>, message: usize, queue: usize) -> Self {
         Waiter {
             next: UnsafeCell::new(null()),
             prev: UnsafeCell::new(null()),
-            futex: Atomic::new(FutexOwner { first: null(), second: null() }),
+            futex: Atomic::new(FutexOwner { first: null(), second: &futex.raw }),
             queue: UnsafeCell::new(queue),
             waker: Atomic::new(WaiterWaker::None),
             message,
@@ -55,22 +77,22 @@ impl Waiter {
     pub(in crate::futex) unsafe fn futex_mut<'a>(self: &'a mut *mut Self) -> &'a mut Atomic<FutexOwner> {
         &mut (**self).futex
     }
-    pub unsafe fn message(self: *const Self) -> usize {
+    pub(in crate::futex) unsafe fn message_raw(self: *const Self) -> usize {
         (*self).message
     }
-    pub unsafe fn next(self: *const Self) -> *const Self {
+    pub(in crate::futex) unsafe fn next(self: *const Self) -> *const Self {
         (*self).next.with_mut(|x| (*x))
     }
-    pub unsafe fn prev(self: *const Self) -> *const Self {
+    pub(in crate::futex) unsafe fn prev(self: *const Self) -> *const Self {
         (*self).prev.with_mut(|x| (*x))
     }
     pub(in crate::futex) unsafe fn queue(self: *const Self) -> usize {
         (*self).queue.with_mut(|x| (*x))
     }
-    pub unsafe fn set_next(self: *const Self, next: *const Self) {
+    pub(in crate::futex) unsafe fn set_next(self: *const Self, next: *const Self) {
         (*self).next.with_mut(|x| (*x) = next);
     }
-    pub unsafe fn set_prev(self: *const Self, prev: *const Self) {
+    pub(in crate::futex) unsafe fn set_prev(self: *const Self, prev: *const Self) {
         (*self).prev.with_mut(|x| (*x) = prev);
     }
     pub(in crate::futex) unsafe fn set_queue(self: *const Self, queue: usize) {
@@ -78,13 +100,30 @@ impl Waiter {
     }
     /// Cause the associated call to wait to return. Note that this method "takes ownership"
     /// of the waiter, and further calls on the waiter are undefined behavior.
-    pub unsafe fn wake(self: *const Self) {
+    pub(in crate::futex) unsafe fn wake(self: *const Self) {
         match self.waker().swap(WaiterWaker::Done, AcqRel) {
             WaiterWaker::Waiting { waker } => {
                 waker.into_waker().wake()
             }
             _ => panic!(),
         }
+    }
+
+    pub fn message(&self) -> usize {
+        self.message
+    }
+
+}
+
+impl<'a> WaiterHandle<'a> {
+    pub(in crate::futex) unsafe fn new(waiter: *mut Waiter) -> Self {
+        WaiterHandle(&mut *waiter)
+    }
+}
+
+impl<'a> WaiterHandleList<'a> {
+    pub(in crate::futex) unsafe fn new(waiter_list: WaiterList) -> Self {
+        WaiterHandleList { raw: waiter_list, phantom: PhantomData }
     }
 }
 
@@ -166,10 +205,6 @@ impl WaiterList {
         }
     }
 
-    pub unsafe fn is_empty(&self) -> bool {
-        self.head == null()
-    }
-
     pub unsafe fn pop_front_many(&mut self, mut count: usize) -> WaiterList {
         if count == usize::MAX {
             return mem::replace(self, WaiterList::new());
@@ -211,14 +246,40 @@ impl WaiterList {
             self.tail = waiter;
         }
     }
+    pub unsafe fn is_empty(&self) -> bool {
+        self.head == null()
+    }
+}
+
+impl<'waiters> WaiterHandleList<'waiters> {
+    pub fn is_empty(&self) -> bool {
+        self.raw.head == null()
+    }
+}
+
+impl<'waiters> WaiterHandle<'waiters> {
+    pub fn wake(self) {
+        unsafe {
+            let ptr = self.0 as *const Waiter;
+            mem::forget(self);
+            ptr.wake();
+        }
+    }
+}
+
+impl<'waiters> Deref for WaiterHandle<'waiters> {
+    type Target = Waiter;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl Drop for Waiter {
     fn drop(&mut self) {
         match self.waker.load_mut() {
             WaiterWaker::Waiting { waker } => {
-                eprintln!("Bad Cancel");
-                abort();
+                unsafe { mem::drop(waker.into_waker()) };
             }
             _ => {}
         }
@@ -252,22 +313,49 @@ impl Debug for WaiterList {
     }
 }
 
-impl Iterator for WaiterList {
-    type Item = *const Waiter;
+impl<'a> Iterator for WaiterHandleIterMut<'a> {
+    type Item = &'a mut Waiter;
 
     fn next(&mut self) -> Option<Self::Item> {
         unsafe {
-            if self.head != null() {
-                let next = self.head.next();
-                let old_head = mem::replace(&mut self.head, next);
-                if self.head == null() {
-                    self.tail = null();
+            if self.raw.head != null() {
+                let next = self.raw.head.next();
+                let old_head = mem::replace(&mut self.raw.head, next);
+                if self.raw.head == null() {
+                    self.raw.tail = null();
                 }
-                Some(old_head)
+                Some(&mut *(old_head as *mut Waiter))
             } else {
                 None
             }
         }
+    }
+}
+
+impl<'waiters> Iterator for WaiterHandleIntoIter<'waiters> {
+    type Item = WaiterHandle<'waiters>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        unsafe {
+            self.raw.pop_front().map(|x| WaiterHandle::new(x as *mut Waiter))
+        }
+    }
+}
+
+impl<'a, 'waiters> IntoIterator for &'a mut WaiterHandleList<'waiters> {
+    type Item = &'a mut Waiter;
+    type IntoIter = WaiterHandleIterMut<'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        WaiterHandleIterMut { raw: self.raw, phantom: PhantomData }
+    }
+}
+
+impl<'waiters> IntoIterator for WaiterHandleList<'waiters> {
+    type Item = WaiterHandle<'waiters>;
+    type IntoIter = WaiterHandleIntoIter<'waiters>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        WaiterHandleIntoIter { raw: self.raw, phantom: PhantomData }
     }
 }
 
@@ -283,14 +371,6 @@ impl Packable for FutexOwner {
     unsafe fn decode(val: Self::Raw) -> Self { mem::transmute(val) }
 }
 
-impl Eq for FutexOwner {}
-
-impl PartialEq for FutexOwner {
-    fn eq(&self, other: &Self) -> bool {
-        self.first == other.first && self.second == other.second
-    }
-}
-
 impl Copy for WaiterList {}
 
 impl Clone for WaiterList {
@@ -302,3 +382,7 @@ impl Default for WaiterList {
         Self::new()
     }
 }
+
+unsafe impl Send for Waiter {}
+
+unsafe impl Sync for Waiter {}
