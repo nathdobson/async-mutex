@@ -62,10 +62,16 @@ impl<T> Mutex<T> {
 
     pub(crate) unsafe fn unlock(&self) {
         test_println!("Unlocking");
-        if self.atom.swap(0, AcqRel) == 2 {
-            test_println!("Notifying");
-            self.queue.notify(1);
-            test_println!("Notified");
+        let mut atom = 1;
+        loop {
+            if self.atom.cmpxchg_weak(&mut atom, 0, AcqRel, Relaxed) {
+                if atom == 2 {
+                    test_println!("Notifying");
+                    self.queue.notify(1);
+                    test_println!("Notified");
+                }
+                break;
+            }
         }
         test_println!("Unlocked");
     }

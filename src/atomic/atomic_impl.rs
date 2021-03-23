@@ -98,15 +98,11 @@ atomic_impl!(AtomicU128, u128);
 struct PlatformDoesNotSupportDoubleWideCompareAndSwap;
 
 #[cfg(all(target_pointer_width = "16", target_has_atomic = "32"))]
-pub type AtomicUsize2 = AtomicU32;
-
+pub type AtomicUsize2Impl = AtomicU32;
 #[cfg(all(target_pointer_width = "16", not(target_has_atomic = "32")))]
-pub type AtomicUsize2 = [PlatformDoesNotSupportDoubleWideCompareAndSwap; 0 - 1];
-
+pub type AtomicUsize2Impl = [PlatformDoesNotSupportDoubleWideCompareAndSwap; 0 - 1];
 #[cfg(all(target_pointer_width = "32", target_has_atomic = "64"))]
-pub type AtomicUsize2 = AtomicU64;
-
-
+pub type AtomicUsize2Impl = AtomicU64;
 #[cfg(all(target_pointer_width = "32", not(target_has_atomic = "64")))]
 pub type AtomicUsize2Impl = [PlatformDoesNotSupportDoubleWideCompareAndSwap; 0 - 1];
 #[cfg(all(target_pointer_width = "64", target_has_atomic = "128"))]
