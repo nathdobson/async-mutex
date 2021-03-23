@@ -1,6 +1,6 @@
 use crate::{thread, Mutex};
 use crate::sync::Arc;
-use crate::tests::test::{IsTest, mutex_test, mutex_cancel_test, condvar_test, channel_test, rwlock_test, fast_mutex_test};
+use crate::tests::test::{IsTest, mutex_test, mutex_cancel_test, condvar_test, channel_test, rwlock_test, fast_mutex_test, queue_test};
 use futures::executor::{LocalPool, ThreadPool};
 use crate::future::{block_on, Future, ready, poll_fn};
 use futures::task::{Spawn, SpawnExt};
@@ -20,6 +20,7 @@ use Poll::Ready;
 use Poll::Pending;
 //use crate::test_println;
 use crate::tests::threadpool;
+use crate::futex2::Queue;
 
 fn run_with_spawner<T: IsTest>(test: T, spawner: &dyn Spawn) -> impl Future {
     let mut state = Arc::new(test.start());
@@ -68,7 +69,6 @@ fn test_lock1() {
     assert_eq!((Poll::Ready(2), vec![]), pool.step(&mut fut1));
 }
 
-
 #[test]
 fn test_lock2() {
     let (test_waker1, waker1) = TestWaker::new();
@@ -105,6 +105,7 @@ fn test_lock2() {
     assert_eq!((1, 0), test_waker1.load());
     assert_eq!((1, 1), test_waker2.load());
 }
+
 
 #[test]
 fn test_cancel1() {
@@ -279,6 +280,18 @@ fn test_channel_recv_send_2() {
 }
 
 #[test]
+fn test_queue_1() {
+    let mut pool = TestPool::new();
+    let queue = Queue::with_capacity(1);
+    let mut fut1 = pool.spawn(queue.wait_if(|| true));
+    let mut fut2 = pool.spawn(async { queue.notify(1); });
+    assert_eq!((Pending, vec![]), pool.step(&mut fut1));
+    assert_eq!((Ready(()), vec![0]), pool.step(&mut fut2));
+    assert_eq!((Ready(()), vec![]), pool.step(&mut fut1));
+}
+
+
+#[test]
 fn test_mutex_locally() { run_locally(mutex_test(100)) }
 
 #[test]
@@ -313,3 +326,9 @@ fn test_rwlock_locally() { run_locally(rwlock_test(1, 1)) }
 
 #[test]
 fn test_rwlock_threaded() { run_threaded(rwlock_test(50000, 0)) }
+
+#[test]
+fn test_queue_locally() { run_locally(queue_test(1, 100)) }
+
+#[test]
+fn test_queue_threaded() { run_threaded(queue_test(1, 100000)) }

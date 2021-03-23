@@ -49,6 +49,8 @@ mod mpsc;
 mod rwlock;
 pub mod fast_mutex;
 pub mod atomic;
+mod lazy;
+mod futex2;
 
 pub use fair_mutex::Mutex;
 pub use fair_mutex::MutexGuard;

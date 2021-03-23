@@ -5,7 +5,7 @@ use crate::sync::atomic::Ordering::Acquire;
 use crate::sync::atomic::Ordering::Release;
 use crate::sync::atomic::Ordering::Relaxed;
 
-pub trait IsOrderingT: 'static {
+pub trait IsOrderingT: 'static + Copy + Clone {
     const ORDERING: Ordering;
 }
 
@@ -15,14 +15,19 @@ pub trait IsReleaseT: IsOrderingT {}
 
 pub trait IsLoadT: IsOrderingT {}
 
+#[derive(Copy,Clone)]
 pub struct SeqCstT;
 
+#[derive(Copy,Clone)]
 pub struct AcqRelT;
 
+#[derive(Copy,Clone)]
 pub struct AcquireT;
 
+#[derive(Copy,Clone)]
 pub struct ReleaseT;
 
+#[derive(Copy,Clone)]
 pub struct RelaxedT;
 
 impl IsOrderingT for SeqCstT { const ORDERING: Ordering = SeqCst; }

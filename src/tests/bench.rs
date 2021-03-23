@@ -11,7 +11,7 @@ use crate::future::{block_on, Future};
 use futures::future::{join_all};
 use std::ops::{DerefMut};
 use tokio::runtime::Runtime;
-use std::time::Instant;
+use std::time::{Instant, Duration};
 use std::any::type_name;
 use crate::future::poll_fn;
 use futures::{pin_mut, FutureExt};
@@ -24,6 +24,7 @@ use std::sync::mpsc::SendError;
 use std::sync::mpsc::RecvError;
 use std::default::default;
 use futures::SinkExt;
+use itertools::Itertools;
 
 async_traits! {
     pub trait SenderTrait<M>: Send PLUS Sync PLUS 'static{
@@ -120,7 +121,7 @@ async_traits! {
     //     };
     // }
 
-    pub trait MutexTrait<M>: Send PLUS Sync PLUS 'static{
+    pub trait MutexTrait<M>: Send PLUS Sync PLUS 'static {
         name mutex_trait;
         async fn lock<'a>(&'a self) IMPL -> impl (std::ops::DerefMut<Target=M>);
     }
@@ -132,6 +133,10 @@ async_traits! {
         name mutex_trait;
         async fn lock = crate::fast_mutex::Mutex::lock;
     }
+    impl<M: Send PLUS 'static> MutexTrait<M> for crate::futex2::mutex::Mutex<M> as crate_faster_mutex {
+        name mutex_trait;
+        async fn lock = crate::futex2::mutex::Mutex::lock;
+    }
     impl<M: Send PLUS 'static> MutexTrait<M> for crate::spin_lock::Mutex<M> as spin_lock_mutex {
         name mutex_trait;
         async fn lock = crate::spin_lock::Mutex::lock;
@@ -140,13 +145,13 @@ async_traits! {
         name mutex_trait;
         async fn lock = tokio::sync::Mutex::lock;
     }
-    impl<M: Send PLUS 'static> MutexTrait<M> for async_std::sync::Mutex<M> as async_std_mutex {
+    impl<M: Send PLUS 'static> MutexTrait<M> for async_lock::Mutex<M> as async_lock_mutex {
         name mutex_trait;
-        async fn lock = async_std::sync::Mutex::lock;
+        async fn lock = async_lock::Mutex::lock;
     }
-    impl<M: Send PLUS 'static> MutexTrait<M> for async_mutex::Mutex<M> as async_mutex_mutex {
+    impl<M: Send PLUS 'static> MutexTrait<M> for futures_util::lock::Mutex<M> as futures_util_mutex {
         name mutex_trait;
-        async fn lock = async_mutex::Mutex::lock;
+        async fn lock = futures_util::lock::Mutex::lock;
     }
     impl<M: Send PLUS 'static> MutexTrait<M> for futures_locks::Mutex<M> as futures_locks_mutex {
         name mutex_trait;
@@ -184,7 +189,7 @@ async fn poll_count(fut: impl Future<Output=()>) -> usize {
     count
 }
 
-fn run_bench<I>(name: &str, iter: I) where I: Iterator<Item: 'static + Send + Future<Output=()>> {
+fn run_bench<I>(name: &str, iter: I) -> Duration where I: Iterator<Item: 'static + Send + Future<Output=()>> {
     let cpu = cpu_time::ProcessTime::now();
     let time = Instant::now();
     let polls = block_on(join_all(iter.map(|task| {
@@ -198,20 +203,29 @@ fn run_bench<I>(name: &str, iter: I) where I: Iterator<Item: 'static + Send + Fu
              format!("{:?}", cpu),
              format!("{:?}", cpu.as_secs_f64() / time.as_secs_f64()),
              polls);
+    time
 }
 
-fn bench_mutex(name: &str, mutex: impl MutexTrait<usize>) {
-    // let (tasks,count) = (100000usize,10usize);
-    let (tasks, count) = (1usize, 10000000usize);
+const CONCURRENCIES: &[usize] = &[1, 2, 3, 4, 10, 100, 1000, 10000, 100000, 1000000];
+
+fn bench_mutex(name: &str, mutex: impl MutexTrait<usize>) -> (&str, Vec<Duration>) {
+    let mut durations = vec![];
     let mutex = Arc::new(mutex);
-    run_bench(name, (0..tasks).map(move |task| {
-        let mutex = mutex.clone();
-        async move {
-            for i in 0..count {
-                *mutex.lock().await += 1;
+    for &i in CONCURRENCIES {
+        let (tasks, count) = (i, 4000000usize / i);
+        durations.push(run_bench(name, (0..tasks).map({
+            let mutex = mutex.clone();
+            move |task| {
+                let mutex = mutex.clone();
+                async move {
+                    for i in 0..count {
+                        *mutex.lock().await += 1;
+                    }
+                }
             }
-        }
-    }));
+        })))
+    }
+    (name, durations)
 }
 
 const CHANNEL_CAP: usize = 1000;
@@ -238,7 +252,7 @@ fn bench_channel(name: &str, (sender, mut receiver): (impl SenderTrait<usize>, i
             for i in 0..CHANNEL_COUNT * 2 {
                 receiver.recv().await.unwrap();
             }
-        }.boxed()].into_iter())
+        }.boxed()].into_iter());
 }
 
 #[test]
@@ -246,14 +260,19 @@ fn bench_channel(name: &str, (sender, mut receiver): (impl SenderTrait<usize>, i
 fn bench_mutexes() {
     let rt = Runtime::new().unwrap();
     let rte = rt.enter();
-    bench_mutex("spin_lock", spin_lock_mutex(default()));
-    bench_mutex("fast_mutex", crate_fast_mutex(default()));
-    bench_mutex("mutex", crate_mutex(default()));
-    bench_mutex("tokio", tokio_mutex(default()));
-    bench_mutex("async_std", async_std_mutex(default()));
-    //bench_mutex("futures_util::lock", futures_util::lock::Mutex::new, futures_util::lock::Mutex::lock);
-    bench_mutex("async_mutex", async_mutex_mutex(default()));
-    bench_mutex("futures", futures_locks_mutex(default()));
+    let mut table = Vec::new();
+    table.push(bench_mutex("spin_lock", spin_lock_mutex(default())));
+    table.push(bench_mutex("fast_mutex", crate_fast_mutex(default())));
+    table.push(bench_mutex("faster_mutex", crate_faster_mutex(default())));
+    table.push(bench_mutex("mutex", crate_mutex(default())));
+    table.push(bench_mutex("tokio", tokio_mutex(default())));
+    table.push(bench_mutex("async_std", async_lock_mutex(default())));
+    //table.push(bench_mutex("futures_util", futures_util_mutex(default())));
+    table.push(bench_mutex("futures_locks", futures_locks_mutex(default())));
+    println!("TABLE,{}", CONCURRENCIES.iter().join(","));
+    for (name, row) in table.iter() {
+        println!("{},{}", name, row.iter().zip(table[0].1.iter()).map(|(x, y)| x.as_secs_f64() / y.as_secs_f64()).join(","));
+    }
 }
 
 #[test]

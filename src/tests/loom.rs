@@ -1,8 +1,10 @@
-use crate::tests::test::{IsTest, mutex_test, mutex_cancel_test, condvar_test, condvar_test_a, channel_test, rwlock_test, fast_mutex_test};
+use crate::tests::test::{IsTest, mutex_test, mutex_cancel_test, condvar_test, condvar_test_a, channel_test, rwlock_test, fast_mutex_test, cell_test, fast2_mutex_test, queue_test};
 use crate::sync::Arc;
 use crate::thread;
 use crate::loom::model::Builder;
 use std::path::{PathBuf, Path};
+use crate::future::poll_fn;
+use std::task::Poll;
 
 fn run_loom<T: IsTest>(mut builder: Builder, test: T) {
     //builder.checkpoint_file = Some(Path::new("checkpoints").join(std::thread::current().name().unwrap()));
@@ -11,7 +13,11 @@ fn run_loom<T: IsTest>(mut builder: Builder, test: T) {
         let mut tasks: Vec<_> = (0..test.tasks()).map(|task| {
             let test = test.clone();
             let state = state.clone();
-            move || crate::loom::future::block_on(test.run(state, task))
+            move || crate::loom::future::block_on(async move {
+                // Ensure the waker doesn't get reused from a freelist
+                let waker = poll_fn(|cx| Poll::Ready(cx.waker().clone())).await;
+                (waker, test.run(state, task).await)
+            })
         }).collect();
         let mut tasks = tasks.into_iter();
         let main = tasks.next().unwrap();
@@ -21,6 +27,7 @@ fn run_loom<T: IsTest>(mut builder: Builder, test: T) {
         for thread in threads.into_iter() {
             results.push(thread.join().unwrap());
         }
+        let results: Vec<_> = results.into_iter().map(|x| x.1).collect();
         test.stop(Arc::get_mut(&mut state).unwrap(), results);
     });
 }
@@ -129,6 +136,59 @@ fn test_fast_mutex_loom_4_2() {
     run_loom(builder, fast_mutex_test(4));
 }
 
+
+#[test]
+fn test_fast2_mutex_loom_1_inf() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = None;
+    run_loom(builder, fast2_mutex_test(1));
+}
+
+#[test]
+fn test_fast2_mutex_loom_2_inf() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = None;
+    run_loom(builder, fast2_mutex_test(2));
+}
+
+#[test]
+fn test_fast2_mutex_loom_3_2() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = Some(2);
+    run_loom(builder, fast2_mutex_test(3));
+}
+
+#[test]
+#[cfg_attr(not(feature = "test_seconds"), ignore)]
+fn test_fast2_mutex_loom_3_3() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = Some(3);
+    run_loom(builder, fast2_mutex_test(3));
+}
+
+#[test]
+#[cfg_attr(not(feature = "test_seconds"), ignore)]
+fn test_fast2_mutex_loom_3_4() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = Some(4);
+    run_loom(builder, fast2_mutex_test(3));
+}
+
+#[test]
+fn test_fast2_mutex_loom_4_1() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = Some(1);
+    run_loom(builder, fast2_mutex_test(4));
+}
+
+#[test]
+#[cfg_attr(not(feature = "test_minute"), ignore)]
+fn test_fast2_mutex_loom_4_2() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = Some(2);
+    run_loom(builder, fast2_mutex_test(4));
+}
+
 #[test]
 fn test_cancel_loom_1_1_inf() {
     let mut builder = Builder::new();
@@ -205,6 +265,7 @@ fn test_condvar_1_inf() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "test_seconds"), ignore)]
 fn test_condvar_2_1() {
     let mut builder = Builder::new();
     builder.preemption_bound = Some(1);
@@ -313,6 +374,7 @@ fn test_rwlock_1_2_4() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "test_seconds"), ignore)]
 fn test_rwlock_2_1_3() {
     let mut builder = Builder::new();
     builder.preemption_bound = Some(3);
@@ -327,3 +389,94 @@ fn test_rwlock_2_1_4() {
     run_loom(builder, rwlock_test(2, 1));
 }
 
+#[test]
+fn test_cell_1_inf() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = None;
+    run_loom(builder, cell_test(1));
+}
+
+#[test]
+fn test_cell_2_inf() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = None;
+    run_loom(builder, cell_test(2));
+}
+
+#[test]
+fn test_cell_3_3() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = Some(3);
+    run_loom(builder, cell_test(3));
+}
+
+#[test]
+#[cfg_attr(not(feature = "test_seconds"), ignore)]
+fn test_cell_3_4() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = Some(4);
+    run_loom(builder, cell_test(3));
+}
+
+#[test]
+#[cfg_attr(not(feature = "test_minute"), ignore)]
+fn test_cell_3_5() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = Some(5);
+    run_loom(builder, cell_test(3));
+}
+
+#[test]
+fn test_queue_1_1_inf() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = None;
+    run_loom(builder, queue_test(1, 1));
+}
+
+#[test]
+fn test_queue_2_1_6() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = Some(6);
+    run_loom(builder, queue_test(1, 2));
+}
+
+#[test]
+#[cfg_attr(not(feature = "test_seconds"), ignore)]
+fn test_queue_3_1_3() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = Some(3);
+    run_loom(builder, queue_test(1, 3));
+}
+
+
+#[test]
+#[cfg_attr(not(feature = "test_seconds"), ignore)]
+fn test_queue_3_2_3() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = Some(3);
+    run_loom(builder, queue_test(2, 3));
+}
+
+#[test]
+#[cfg_attr(not(feature = "test_seconds"), ignore)]
+fn test_queue_4_1_1() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = Some(1);
+    run_loom(builder, queue_test(1, 4));
+}
+
+#[test]
+#[cfg_attr(not(feature = "test_seconds"), ignore)]
+fn test_queue_4_2_1() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = Some(1);
+    run_loom(builder, queue_test(2, 4));
+}
+
+#[test]
+#[cfg_attr(not(feature = "test_seconds"), ignore)]
+fn test_queue_4_4_1() {
+    let mut builder = Builder::new();
+    builder.preemption_bound = Some(1);
+    run_loom(builder, queue_test(4, 4));
+}

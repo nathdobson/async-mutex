@@ -20,7 +20,6 @@ use crate::sync::Arc;
 use crate::sync::atomic::AtomicBool;
 use crate::sync::atomic::AtomicUsize;
 use crate::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
-use crate::util::{AsyncFnOnce, Bind, FnOnceExt};
 use crate::futex::{Futex};
 use crate::atomic::{Packable, AcquireT, RelaxedT, ReleaseT, AcqRelT};
 

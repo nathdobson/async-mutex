@@ -1,15 +1,8 @@
-use crate::future::Future;
 use crate::sync::Arc;
-use futures::executor::{LocalPool, ThreadPool};
-use crate::future::block_on;
-use futures::task::{Spawn, SpawnExt};
-use futures::future::join_all;
-use crate::{Mutex, fast_mutex};
+use std::future::{Future};
+use crate::{Mutex, fast_mutex, futex2};
 //use crate::test_println;
-use futures::future::poll_fn;
-use futures::pin_mut;
 use std::task::Poll;
-use futures::poll;
 use std::mem;
 use crate::condvar::Condvar;
 use std::collections::HashSet;
@@ -19,6 +12,10 @@ use crate::mpsc::Sender;
 use std::mem::MaybeUninit;
 use crate::cell::UnsafeCell;
 use crate::rwlock::RwLock;
+use crate::lazy::SyncOnceCell;
+use crate::futex2::Queue;
+use pin_utils::pin_mut;
+use crate::future::poll_fn;
 
 #[derive(Copy, Clone)]
 pub struct Test<Start, Run, Stop>
@@ -115,6 +112,29 @@ pub fn fast_mutex_test(tasks: usize) -> impl IsTest {
     }
 }
 
+pub fn fast2_mutex_test(tasks: usize) -> impl IsTest {
+    Test {
+        tasks,
+        start: move || -> futex2::mutex::Mutex<usize>{
+            test_println!("Creating mutex");
+            futex2::mutex::Mutex::new(0)
+        },
+        run: move |mutex: Arc<futex2::mutex::Mutex<usize>>, task| async move {
+            test_println!("Starting {}", task);
+            let mut lock = mutex.lock().await;
+            test_println!("Running  {}", task);
+            *lock |= task;
+        },
+        stop: move |mut mutex, _| {
+            let mut expected = 0;
+            for task in 0..tasks {
+                expected |= task;
+            }
+            assert_eq!(expected, *mutex.get_mut())
+        },
+    }
+}
+
 pub fn mutex_cancel_test(locks: usize, cancels: usize) -> impl IsTest {
     Test {
         tasks: locks + cancels,
@@ -132,7 +152,10 @@ pub fn mutex_cancel_test(locks: usize, cancels: usize) -> impl IsTest {
                 test_println!("Canceling  {}", task);
                 let fut = mutex.lock();
                 pin_mut!(fut);
-                mem::drop(poll!(fut));
+                poll_fn(|cx| {
+                    mem::drop(fut.as_mut().poll(cx));
+                    Poll::Ready(())
+                }).await;
             }
         },
         stop: move |mut mutex, _| {
@@ -258,7 +281,6 @@ pub fn channel_test(senders: &'static [usize], cap: usize) -> impl IsTest {
     }
 }
 
-
 pub fn rwlock_test(writers: usize, readers: usize) -> impl IsTest {
     Test {
         tasks: readers + writers,
@@ -281,5 +303,41 @@ pub fn rwlock_test(writers: usize, readers: usize) -> impl IsTest {
             }
             assert_eq!(expected, *mutex.get_mut())
         },
+    }
+}
+
+pub fn cell_test(tasks: usize) -> impl IsTest {
+    Test {
+        tasks: tasks,
+        start: move || -> SyncOnceCell<usize>{
+            SyncOnceCell::new()
+        },
+        run: move |cell: Arc<SyncOnceCell<usize>>, task| async move {
+            assert_eq!(&1, cell.get_or_init(async { 1 }).await);
+        },
+        stop: move |mut cell, _| {},
+    }
+}
+
+pub fn queue_test(cap: usize, tasks: usize) -> impl IsTest {
+    Test {
+        tasks: tasks,
+        start: move || -> Queue{
+            Queue::with_capacity(cap)
+        },
+        run: move |queue: Arc<Queue>, task| async move {
+            let wait = queue.wait_if(|| true);
+            pin_mut!(wait);
+            let mut notified = false;
+            poll_fn(|cx| {
+                let result = wait.as_mut().poll(cx);
+                if !notified {
+                    notified = true;
+                    queue.notify(1);
+                }
+                result
+            }).await;
+        },
+        stop: move |mut cell, _| {},
     }
 }
